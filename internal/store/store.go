@@ -17,8 +17,9 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/avatar31/dotfs-mcp-server/internal/model"
 	"github.com/dgraph-io/badger/v4"
+
+	"github.com/avatar31/dotfs-mcp-server/internal/model"
 )
 
 const (
@@ -89,6 +90,27 @@ func repoIndexKey(repo, name string) []byte {
 // idx:<repo_name>: is the prefix for all secondary index keys for a repository.
 func repoIndexPrefix(repo string) []byte {
 	return []byte(idxPrefix + repo + ":")
+}
+
+// Get performs the constant-time primary lookup used by the MCP search tool.
+func (s *Store) Get(name string) (model.FunctionRecord, error) {
+	var rec model.FunctionRecord
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(FunctionKey(name))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			return json.Unmarshal(val, &rec)
+		})
+	})
+	switch {
+	case errors.Is(err, badger.ErrKeyNotFound):
+		return model.FunctionRecord{}, ErrNotFound
+	case err != nil:
+		return model.FunctionRecord{}, fmt.Errorf("read function %q: %w", name, err)
+	}
+	return rec, nil
 }
 
 // Put writes a record only when it differs from the cached copy (structural

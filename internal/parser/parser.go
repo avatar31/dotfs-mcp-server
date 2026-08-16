@@ -87,3 +87,43 @@ func (r *Registry) Extensions() []string {
 	sort.Strings(out)
 	return out
 }
+
+// cleanComment strips C/Go comment markers and uniform indentation so the cache
+// stores boilerplate-free documentation text.
+func cleanComment(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "/*") {
+		raw = strings.TrimPrefix(raw, "/*")
+		raw = strings.TrimSuffix(raw, "*/")
+	}
+
+	lines := strings.Split(raw, "\n")
+	cleaned := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "///"):
+			line = strings.TrimPrefix(line, "///")
+		case strings.HasPrefix(line, "//"):
+			line = strings.TrimPrefix(line, "//")
+		case strings.HasPrefix(line, "*/"):
+			line = strings.TrimPrefix(line, "*/")
+		case strings.HasPrefix(line, "*"):
+			line = strings.TrimPrefix(line, "*")
+		}
+		cleaned = append(cleaned, strings.TrimSpace(line))
+	}
+
+	// Drop leading and trailing blank lines while preserving internal spacing.
+	start, end := 0, len(cleaned)
+	for start < end && cleaned[start] == "" {
+		start++
+	}
+	for end > start && cleaned[end-1] == "" {
+		end--
+	}
+	return strings.Join(cleaned[start:end], "\n")
+}

@@ -247,6 +247,70 @@ func (ix *Indexer) IndexRepo(ctx context.Context, repo string) (Summary, error) 
 	return summary, nil
 }
 
+// SearchLive is the real-time fallback used when the cache misses: it applies
+// Phase 1 (bytes.Contains) across the workspace and only pays for Phase 2 on
+// files that literally contain the token. Matches are written back to cache.
+func (ix *Indexer) SearchLive(ctx context.Context, target string) (model.FunctionRecord, bool, error) {
+	repos, err := ix.ListRepos()
+	if err != nil {
+		return model.FunctionRecord{}, false, err
+	}
+
+	for _, repo := range repos {
+		repoPath, err := SafeRepoPath(ix.opts.WorkspaceRoot, repo)
+		if err != nil {
+			ix.log.Warn("skipping unreadable repository", "repo", repo, "error", err)
+			continue
+		}
+		files, _, err := ix.collectFiles(ctx, repoPath)
+		if err != nil {
+			return model.FunctionRecord{}, false, err
+		}
+
+		for _, path := range files {
+			if err := ctx.Err(); err != nil {
+				return model.FunctionRecord{}, false, err
+			}
+
+			res := ix.parseFile(ctx, repoPath, path, target)
+			if res.err != nil {
+				ix.log.Debug("live scan parse failure", "file", res.relPath, "error", res.err)
+				continue
+			}
+
+			for _, fn := range res.functions {
+				if !matchesName(fn, target) {
+					continue
+				}
+				rec := model.FunctionRecord{
+					RepoName:      repo,
+					FilePath:      filepath.ToSlash(filepath.Join(repo, res.relPath)),
+					Language:      fn.Language,
+					Documentation: fn.Documentation,
+					SourceCode:    fn.SourceCode,
+				}
+				if _, err := ix.store.Put(target, rec); err != nil {
+					ix.log.Error("failed to cache live scan hit", "function", target, "error", err)
+				}
+				return rec, true, nil
+			}
+		}
+	}
+	return model.FunctionRecord{}, false, nil
+}
+
+func matchesName(fn parser.Function, target string) bool {
+	if fn.Name == target {
+		return true
+	}
+	for _, alias := range fn.Aliases {
+		if alias == target {
+			return true
+		}
+	}
+	return false
+}
+
 // parseFile executes Phase 1 then Phase 2 for a single file. A nil function
 // slice with a nil error means the file was rejected by the Phase 1 filter.
 func (ix *Indexer) parseFile(ctx context.Context, repoPath, path, target string) parseResult {

@@ -2,7 +2,10 @@ module github.com/avatar31/dotfs-mcp-server
 
 go 1.26.3
 
-require github.com/dgraph-io/badger/v4 v4.9.6
+require (
+	github.com/dgraph-io/badger/v4 v4.9.6
+	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
+)
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
