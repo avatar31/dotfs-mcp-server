@@ -1,13 +1,19 @@
 // Package store wraps the embedded BadgerDB cache that persists parsed
 // multi-language AST metadata between server reboots.
 //
-// Key layout:
+// Phase 2 key layout (a single typed namespace, no single-dimension keys):
 //
-//	func:<function_name>          -> JSON model.FunctionRecord
-//	idx:<repo_name>:<function_name> -> empty (repository ownership index)
+//	sym:<repo>:<file_path>:<symbol_type>:<name>:<offset>          -> JSON model.SymbolRecord
+//	idx:name:<name>:<repo>:<file_path>:<offset>                   -> primary key
+//	idx:type:<symbol_type>:<name>:<repo>:<file_path>:<offset>     -> primary key
+//	idx:file:<repo>:<file_path>:<offset>                          -> primary key
 //
-// The primary key gives the LLM an O(1) lookup, while the secondary index makes
-// per-repository enumeration and pruning possible during a re-index cycle.
+// <offset> is the symbol start byte rendered with %08d so the LSM tree keeps
+// symbols of one file in source order.
+//
+// The specification marks index values as empty. This implementation stores the
+// primary key instead: it turns "index hit -> record" into a single O(1) Get
+// rather than a prefix scan, and an index entry is worthless without it.
 package store
 
 import (
@@ -15,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 
 	"github.com/dgraph-io/badger/v4"
@@ -23,12 +30,18 @@ import (
 )
 
 const (
-	funcPrefix = "func:"
-	idxPrefix  = "idx:"
+	symPrefix     = "sym:"
+	nameIdxPrefix = "idx:name:"
+	typeIdxPrefix = "idx:type:"
+	fileIdxPrefix = "idx:file:"
+
+	// deleteBatch bounds a single prune transaction so a very large repository
+	// can never exceed BadgerDB's maximum transaction size.
+	deleteBatch = 512
 )
 
-// ErrNotFound is returned when a function key is absent from the cache.
-var ErrNotFound = errors.New("function not found in cache")
+// ErrNotFound is returned when a symbol is absent from the cache.
+var ErrNotFound = errors.New("symbol not found in cache")
 
 // Store is a concurrency-safe handle around BadgerDB.
 type Store struct {
@@ -36,13 +49,31 @@ type Store struct {
 	log *slog.Logger
 }
 
+// Filter narrows a symbol lookup.
+type Filter struct {
+	// Repo restricts results to one repository ("" means every repository).
+	Repo string
+	// Types restricts results to the listed symbol kinds (nil means all kinds).
+	Types []model.SymbolType
+	// ExactOnly rejects prefix matches, keeping only identical identifiers.
+	ExactOnly bool
+	// Limit caps the number of returned records (<= 0 means DefaultLookupLimit).
+	Limit int
+}
+
+// DefaultLookupLimit bounds an unfiltered lookup so a one-character prefix can
+// never flood the LLM context window.
+const DefaultLookupLimit = 25
+
 // RepoStat aggregates what the cache knows about a single repository.
 type RepoStat struct {
-	RepoName  string         `json:"repo_name"`
-	Functions int            `json:"function_count"`
-	Languages map[string]int `json:"languages"`
-	Files     map[string]int `json:"-"`
-	Samples   []string       `json:"sample_functions"`
+	RepoName    string         `json:"repo_name"`
+	Symbols     int            `json:"symbol_count"`
+	Functions   int            `json:"function_count"`
+	Languages   map[string]int `json:"languages"`
+	SymbolTypes map[string]int `json:"symbol_types"`
+	Files       map[string]int `json:"-"`
+	Samples     []string       `json:"sample_symbols"`
 }
 
 // Open initialises (or re-opens) the on-disk cache at dir.
@@ -78,161 +109,307 @@ func (s *Store) RunValueLogGC(discardRatio float64) error {
 	return nil
 }
 
-// FunctionKey builds the primary cache key for a function name.
-// func:<function_name> is the primary key for a function record.
-func FunctionKey(name string) []byte { return []byte(funcPrefix + name) }
+// esc neutralises the key separator inside a variable component. Only key
+// construction is affected; the persisted record always holds the real value.
+func esc(part string) string { return strings.ReplaceAll(part, ":", "%3A") }
 
-// idx:<repo_name>:<function_name> is the secondary index key for a function name.
-func repoIndexKey(repo, name string) []byte {
-	return []byte(idxPrefix + repo + ":" + name)
+// offsetToken renders a byte offset with the mandated 8-character zero padding
+// so byte ranges sort lexicographically inside the LSM tree.
+func offsetToken(off int) string { return fmt.Sprintf("%08d", off) }
+
+// PrimaryKey builds sym:<repo>:<file_path>:<symbol_type>:<name>:<offset>.
+func PrimaryKey(rec model.SymbolRecord) string {
+	return symPrefix + esc(rec.RepoName) + ":" + esc(rec.FilePath) + ":" +
+		esc(string(rec.SymbolType)) + ":" + esc(rec.Name) + ":" + offsetToken(rec.StartByte)
 }
 
-// idx:<repo_name>: is the prefix for all secondary index keys for a repository.
-func repoIndexPrefix(repo string) []byte {
-	return []byte(idxPrefix + repo + ":")
+// nameIndexKey builds idx:name:<name>:<repo>:<file_path>:<offset>.
+func nameIndexKey(name string, rec model.SymbolRecord) string {
+	return nameIdxPrefix + esc(name) + ":" + esc(rec.RepoName) + ":" +
+		esc(rec.FilePath) + ":" + offsetToken(rec.StartByte)
 }
 
-// Get performs the constant-time primary lookup used by the MCP search tool.
-func (s *Store) Get(name string) (model.FunctionRecord, error) {
-	var rec model.FunctionRecord
-	err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(FunctionKey(name))
-		if err != nil {
-			return err
+// typeIndexKey builds idx:type:<symbol_type>:<name>:<repo>:<file_path>:<offset>.
+func typeIndexKey(name string, rec model.SymbolRecord) string {
+	return typeIdxPrefix + esc(string(rec.SymbolType)) + ":" + esc(name) + ":" +
+		esc(rec.RepoName) + ":" + esc(rec.FilePath) + ":" + offsetToken(rec.StartByte)
+}
+
+// fileIndexKey builds idx:file:<repo>:<file_path>:<offset>.
+func fileIndexKey(rec model.SymbolRecord) string {
+	return fileIdxPrefix + esc(rec.RepoName) + ":" + esc(rec.FilePath) + ":" + offsetToken(rec.StartByte)
+}
+
+// repoSymbolPrefix is the primary-record prefix used for repository-wide
+// invalidation, i.e. "sym:<repo>:".
+func repoSymbolPrefix(repo string) []byte { return []byte(symPrefix + esc(repo) + ":") }
+
+// fileSymbolPrefix is "sym:<repo>:<file_path>:".
+func fileSymbolPrefix(repo, file string) []byte {
+	return []byte(symPrefix + esc(repo) + ":" + esc(file) + ":")
+}
+
+// indexKeys returns every secondary key that must accompany rec, covering the
+// canonical name and each declared alias.
+func indexKeys(rec model.SymbolRecord) []string {
+	names := append([]string{rec.Name}, rec.Aliases...)
+	keys := make([]string, 0, 2*len(names)+1)
+	seen := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		if strings.TrimSpace(n) == "" {
+			continue
 		}
-		return item.Value(func(val []byte) error {
-			return json.Unmarshal(val, &rec)
-		})
-	})
-	switch {
-	case errors.Is(err, badger.ErrKeyNotFound):
-		return model.FunctionRecord{}, ErrNotFound
-	case err != nil:
-		return model.FunctionRecord{}, fmt.Errorf("read function %q: %w", name, err)
+		if _, dup := seen[n]; dup {
+			continue
+		}
+		seen[n] = struct{}{}
+		keys = append(keys, nameIndexKey(n, rec), typeIndexKey(n, rec))
 	}
-	return rec, nil
+	return append(keys, fileIndexKey(rec))
 }
 
-// Put writes a record only when it differs from the cached copy (structural
-// delta check) and keeps the repository ownership index in sync. It reports
-// whether a physical write occurred.
-func (s *Store) Put(name string, rec model.FunctionRecord) (bool, error) {
-	if strings.TrimSpace(name) == "" {
-		return false, fmt.Errorf("refusing to cache a record with an empty function name")
-	}
+// PutSymbol writes a record only when it differs from the cached copy
+// (structural delta check) and refreshes every secondary index. It returns the
+// primary key together with a flag reporting whether a physical write occurred.
+func (s *Store) PutSymbol(rec model.SymbolRecord) (string, bool, error) {
 	if err := rec.Validate(); err != nil {
-		return false, fmt.Errorf("invalid record for %q: %w", name, err)
+		return "", false, fmt.Errorf("invalid record for %q: %w", rec.Name, err)
 	}
 
+	primary := PrimaryKey(rec)
 	payload, err := json.Marshal(rec)
 	if err != nil {
-		return false, fmt.Errorf("marshal record for %q: %w", name, err)
+		return "", false, fmt.Errorf("marshal record for %q: %w", rec.Name, err)
 	}
 
 	changed := false
 	err = s.db.Update(func(txn *badger.Txn) error {
-		item, err := txn.Get(FunctionKey(name))
+		item, err := txn.Get([]byte(primary))
 		switch {
 		case err == nil:
-			var existing model.FunctionRecord
-			if verr := item.Value(func(val []byte) error {
-				return json.Unmarshal(val, &existing)
-			}); verr == nil && existing.Fingerprint() == rec.Fingerprint() {
-				// No structural delta: keep the index fresh and skip the write.
-				return txn.Set(repoIndexKey(rec.RepoName, name), nil)
+			var existing model.SymbolRecord
+			verr := item.Value(func(val []byte) error { return json.Unmarshal(val, &existing) })
+			if verr == nil && existing.Fingerprint() == rec.Fingerprint() {
+				// No structural delta: refresh the indexes and skip the write.
+				return writeIndexes(txn, rec, primary)
 			}
 		case errors.Is(err, badger.ErrKeyNotFound):
 		default:
 			return err
 		}
 
-		if err := txn.Set(FunctionKey(name), payload); err != nil {
+		if err := txn.Set([]byte(primary), payload); err != nil {
 			return err
 		}
-		if err := txn.Set(repoIndexKey(rec.RepoName, name), nil); err != nil {
+		if err := writeIndexes(txn, rec, primary); err != nil {
 			return err
 		}
 		changed = true
 		return nil
 	})
 	if err != nil {
-		return false, fmt.Errorf("cache function %q: %w", name, err)
+		return "", false, fmt.Errorf("cache symbol %q: %w", rec.Name, err)
 	}
-	return changed, nil
+	return primary, changed, nil
 }
 
-// ListRepoFunctions returns every function name currently attributed to repo.
-func (s *Store) ListRepoFunctions(repo string) ([]string, error) {
-	prefix := repoIndexPrefix(repo)
-	var names []string
+func writeIndexes(txn *badger.Txn, rec model.SymbolRecord, primary string) error {
+	for _, key := range indexKeys(rec) {
+		if err := txn.Set([]byte(key), []byte(primary)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
+// candidate pairs a primary key with the identifier that matched the query, so
+// alias hits can still be classified as exact.
+type candidate struct {
+	primary string
+	matched string
+}
+
+// Lookup resolves a symbol by exact name or name prefix. Supplying Filter.Types
+// switches the scan to the type-partitioned index, which keeps a query such as
+// "every struct called fsal_*" proportional to the result set.
+func (s *Store) Lookup(name string, f Filter) ([]model.SymbolRecord, error) {
+	query := strings.TrimSpace(name)
+	if query == "" {
+		return nil, errors.New("lookup requires a non-empty symbol name")
+	}
+	limit := f.Limit
+	if limit <= 0 {
+		limit = DefaultLookupLimit
+	}
+
+	prefixes := make([][]byte, 0, len(f.Types))
+	if len(f.Types) == 0 {
+		prefixes = append(prefixes, []byte(nameIdxPrefix+esc(query)))
+	} else {
+		for _, t := range f.Types {
+			prefixes = append(prefixes, []byte(typeIdxPrefix+esc(string(t))+":"+esc(query)))
+		}
+	}
+
+	var records []model.SymbolRecord
+	err := s.db.View(func(txn *badger.Txn) error {
+		seen := make(map[string]struct{})
+		var cands []candidate
+
+		for _, prefix := range prefixes {
+			opts := badger.DefaultIteratorOptions
+			opts.Prefix = prefix
+			it := txn.NewIterator(opts)
+			for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+				item := it.Item()
+				matched, ok := matchedName(string(item.Key()), len(f.Types) > 0)
+				if !ok {
+					continue
+				}
+				if f.ExactOnly && matched != query {
+					continue
+				}
+				primary, err := item.ValueCopy(nil)
+				if err != nil {
+					it.Close()
+					return err
+				}
+				if _, dup := seen[string(primary)]; dup {
+					continue
+				}
+				seen[string(primary)] = struct{}{}
+				cands = append(cands, candidate{primary: string(primary), matched: matched})
+			}
+			it.Close()
+		}
+
+		for _, c := range cands {
+			item, err := txn.Get([]byte(c.primary))
+			if errors.Is(err, badger.ErrKeyNotFound) {
+				continue // dangling index entry: the record was pruned
+			}
+			if err != nil {
+				return err
+			}
+			var rec model.SymbolRecord
+			if err := item.Value(func(val []byte) error { return json.Unmarshal(val, &rec) }); err != nil {
+				return err
+			}
+			if f.Repo != "" && rec.RepoName != f.Repo {
+				continue
+			}
+			records = append(records, rec)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("lookup symbol %q: %w", query, err)
+	}
+
+	sortRecords(records, query)
+	if len(records) > limit {
+		records = records[:limit]
+	}
+	return records, nil
+}
+
+// matchedName extracts the identifier component from a secondary index key.
+// Name keys are idx:name:<name>:..., type keys are idx:type:<type>:<name>:...
+func matchedName(key string, typed bool) (string, bool) {
+	var rest string
+	switch {
+	case typed && strings.HasPrefix(key, typeIdxPrefix):
+		rest = key[len(typeIdxPrefix):]
+		sep := strings.IndexByte(rest, ':')
+		if sep < 0 {
+			return "", false
+		}
+		rest = rest[sep+1:]
+	case !typed && strings.HasPrefix(key, nameIdxPrefix):
+		rest = key[len(nameIdxPrefix):]
+	default:
+		return "", false
+	}
+	sep := strings.IndexByte(rest, ':')
+	if sep < 0 {
+		return "", false
+	}
+	return strings.ReplaceAll(rest[:sep], "%3A", ":"), true
+}
+
+// sortRecords puts exact identifier matches first, then orders deterministically
+// so repeated tool calls return a stable document.
+func sortRecords(records []model.SymbolRecord, query string) {
+	rank := func(r model.SymbolRecord) int {
+		if r.Name == query {
+			return 0
+		}
+		for _, a := range r.Aliases {
+			if a == query {
+				return 1
+			}
+		}
+		return 2
+	}
+	sort.SliceStable(records, func(i, j int) bool {
+		if ri, rj := rank(records[i]), rank(records[j]); ri != rj {
+			return ri < rj
+		}
+		if records[i].Name != records[j].Name {
+			return records[i].Name < records[j].Name
+		}
+		if records[i].RepoName != records[j].RepoName {
+			return records[i].RepoName < records[j].RepoName
+		}
+		if records[i].FilePath != records[j].FilePath {
+			return records[i].FilePath < records[j].FilePath
+		}
+		return records[i].StartByte < records[j].StartByte
+	})
+}
+
+// FileSymbols returns every symbol recorded for one file, in source order.
+func (s *Store) FileSymbols(repo, file string) ([]model.SymbolRecord, error) {
+	prefix := fileSymbolPrefix(repo, file)
+	records, err := s.scanRecords(prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list symbols for %s/%s: %w", repo, file, err)
+	}
+	sort.SliceStable(records, func(i, j int) bool { return records[i].StartByte < records[j].StartByte })
+	return records, nil
+}
+
+// RepoSymbolKeys returns the primary key of every symbol currently attributed to
+// repo. The indexer diffs this set against a freshly parsed one.
+func (s *Store) RepoSymbolKeys(repo string) ([]string, error) {
+	prefix := repoSymbolPrefix(repo)
+	var keys []string
 	err := s.db.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.PrefetchValues = false
 		opts.Prefix = prefix
 		it := txn.NewIterator(opts)
 		defer it.Close()
-
 		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-			names = append(names, strings.TrimPrefix(string(it.Item().Key()), string(prefix)))
+			keys = append(keys, string(it.Item().KeyCopy(nil)))
 		}
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("list functions for repo %q: %w", repo, err)
+		return nil, fmt.Errorf("list symbol keys for repo %q: %w", repo, err)
 	}
-	return names, nil
+	return keys, nil
 }
 
-// PruneRepo removes index entries (and their primary records when still owned
-// by repo) for every stale function name. It is used after a re-index cycle to
-// evict functions that disappeared from the source tree.
-func (s *Store) PruneRepo(repo string, stale []string) (int, error) {
-	if len(stale) == 0 {
-		return 0, nil
-	}
-	removed := 0
-	err := s.db.Update(func(txn *badger.Txn) error {
-		for _, name := range stale {
-			if err := txn.Delete(repoIndexKey(repo, name)); err != nil {
-				return err
-			}
-			item, err := txn.Get(FunctionKey(name))
-			if errors.Is(err, badger.ErrKeyNotFound) {
-				continue
-			}
-			if err != nil {
-				return err
-			}
-			var rec model.FunctionRecord
-			if err := item.Value(func(val []byte) error {
-				return json.Unmarshal(val, &rec)
-			}); err != nil {
-				return err
-			}
-			// Another repository may have taken ownership of the key meanwhile.
-			if rec.RepoName != repo {
-				continue
-			}
-			if err := txn.Delete(FunctionKey(name)); err != nil {
-				return err
-			}
-			removed++
-		}
-		return nil
-	})
-	if err != nil {
-		return 0, fmt.Errorf("prune repo %q: %w", repo, err)
-	}
-	return removed, nil
-}
+// PruneRepo implements incremental invalidation: it scans every key under
+// "sym:<repo>:" and removes each record (plus its secondary index entries) whose
+// primary key is absent from keep. Deletions are batched so a large repository
+// never exceeds the maximum transaction size.
+func (s *Store) PruneRepo(repo string, keep map[string]struct{}) (int, error) {
+	prefix := repoSymbolPrefix(repo)
 
-// Stats walks the primary keyspace and aggregates per-repository metrics used
-// by the list_repo_capabilities tool.
-func (s *Store) Stats() (map[string]RepoStat, error) {
-	stats := make(map[string]RepoStat)
-	prefix := []byte(funcPrefix)
-
+	var stale []model.SymbolRecord
+	var staleKeys []string
 	err := s.db.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.Prefix = prefix
@@ -241,28 +418,113 @@ func (s *Store) Stats() (map[string]RepoStat, error) {
 
 		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
 			item := it.Item()
-			name := strings.TrimPrefix(string(item.Key()), funcPrefix)
+			key := string(item.KeyCopy(nil))
+			if _, live := keep[key]; live {
+				continue
+			}
+			var rec model.SymbolRecord
+			if err := item.Value(func(val []byte) error { return json.Unmarshal(val, &rec) }); err != nil {
+				// A corrupt payload still has to go; the key alone is enough.
+				s.log.Warn("dropping unreadable cache record", "key", key, "error", err)
+			}
+			stale = append(stale, rec)
+			staleKeys = append(staleKeys, key)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("scan repo %q for invalidation: %w", repo, err)
+	}
 
-			var rec model.FunctionRecord
-			if err := item.Value(func(val []byte) error {
-				return json.Unmarshal(val, &rec)
-			}); err != nil {
+	removed := 0
+	for start := 0; start < len(staleKeys); start += deleteBatch {
+		end := min(start+deleteBatch, len(staleKeys))
+		batchKeys, batchRecs := staleKeys[start:end], stale[start:end]
+
+		err := s.db.Update(func(txn *badger.Txn) error {
+			for i, key := range batchKeys {
+				if err := txn.Delete([]byte(key)); err != nil {
+					return err
+				}
+				if batchRecs[i].Name == "" {
+					continue
+				}
+				for _, idx := range indexKeys(batchRecs[i]) {
+					if err := txn.Delete([]byte(idx)); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return removed, fmt.Errorf("invalidate stale records for repo %q: %w", repo, err)
+		}
+		removed += len(batchKeys)
+	}
+	return removed, nil
+}
+
+// scanRecords materialises every record stored under prefix.
+func (s *Store) scanRecords(prefix []byte) ([]model.SymbolRecord, error) {
+	var records []model.SymbolRecord
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			var rec model.SymbolRecord
+			if err := it.Item().Value(func(val []byte) error { return json.Unmarshal(val, &rec) }); err != nil {
+				return err
+			}
+			records = append(records, rec)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+// Stats walks the primary keyspace and aggregates per-repository metrics used
+// by the list_repo_capabilities tool.
+func (s *Store) Stats() (map[string]RepoStat, error) {
+	stats := make(map[string]RepoStat)
+	prefix := []byte(symPrefix)
+
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			var rec model.SymbolRecord
+			if err := it.Item().Value(func(val []byte) error { return json.Unmarshal(val, &rec) }); err != nil {
 				return err
 			}
 
 			stat, ok := stats[rec.RepoName]
 			if !ok {
 				stat = RepoStat{
-					RepoName:  rec.RepoName,
-					Languages: make(map[string]int),
-					Files:     make(map[string]int),
+					RepoName:    rec.RepoName,
+					Languages:   make(map[string]int),
+					SymbolTypes: make(map[string]int),
+					Files:       make(map[string]int),
 				}
 			}
-			stat.Functions++
+			stat.Symbols++
+			if rec.SymbolType == model.SymbolFunction || rec.SymbolType == model.SymbolMethod {
+				stat.Functions++
+			}
 			stat.Languages[string(rec.Language)]++
+			stat.SymbolTypes[string(rec.SymbolType)]++
 			stat.Files[rec.FilePath]++
 			if len(stat.Samples) < 12 {
-				stat.Samples = append(stat.Samples, name)
+				stat.Samples = append(stat.Samples, rec.Name)
 			}
 			stats[rec.RepoName] = stat
 		}

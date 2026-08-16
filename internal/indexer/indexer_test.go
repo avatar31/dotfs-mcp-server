@@ -72,7 +72,21 @@ func fixtureWorkspace(t *testing.T) string {
 	return dst
 }
 
-func TestIndexAllPopulatesBothLanguages(t *testing.T) {
+// lookupOne resolves exactly one cached record by exact name.
+func lookupOne(t *testing.T, st *store.Store, name string, types ...model.SymbolType) model.SymbolRecord {
+	t.Helper()
+
+	got, err := st.Lookup(name, store.Filter{ExactOnly: true, Types: types})
+	if err != nil {
+		t.Fatalf("lookup %s: %v", name, err)
+	}
+	if len(got) == 0 {
+		t.Fatalf("symbol %q was not indexed", name)
+	}
+	return got[0]
+}
+
+func TestIndexAllPopulatesEveryConstructOfBothLanguages(t *testing.T) {
 	root := fixtureWorkspace(t)
 	ix, st := newTestIndexer(t, root)
 
@@ -81,125 +95,195 @@ func TestIndexAllPopulatesBothLanguages(t *testing.T) {
 		t.Fatalf("index all: %v", err)
 	}
 	if len(summaries) != 2 {
-		t.Fatalf("want 2 repository summaries, got %d", len(summaries))
+		t.Fatalf("indexed %d repositories, want 2", len(summaries))
+	}
+	for _, s := range summaries {
+		if s.SymbolsFound == 0 || s.RecordsWritten == 0 {
+			t.Errorf("repository %s produced no symbols: %+v", s.Repo, s)
+		}
 	}
 
-	goRec, err := st.Get("ValidateSessionToken")
-	if err != nil {
-		t.Fatalf("go record lookup: %v", err)
+	// Go constructs.
+	fn := lookupOne(t, st, "ValidateSessionToken")
+	if fn.RepoName != "auth-service-go" || fn.Language != model.LanguageGo {
+		t.Errorf("unexpected provenance: %+v", fn)
 	}
-	if goRec.RepoName != "auth-service-go" {
-		t.Fatalf("want repo auth-service-go, got %q", goRec.RepoName)
+	if fn.FilePath != "token.go" {
+		t.Errorf("file_path must be repository-relative, got %q", fn.FilePath)
 	}
-	if goRec.Language != model.LanguageGo {
-		t.Fatalf("want language go, got %q", goRec.Language)
+	if fn.SymbolType != model.SymbolFunction || fn.StartLine == 0 {
+		t.Errorf("unexpected function record: %+v", fn)
 	}
-	if goRec.FilePath != "auth-service-go/token.go" {
-		t.Fatalf("unexpected file path %q", goRec.FilePath)
+	if st := lookupOne(t, st, "Session", model.SymbolStruct); !strings.Contains(st.SourceCode, "TTL") {
+		t.Errorf("struct body was not cached: %q", st.SourceCode)
 	}
-	if !strings.Contains(goRec.Documentation, "verifies the HMAC signature") {
-		t.Fatalf("documentation was not captured: %q", goRec.Documentation)
+	if iface := lookupOne(t, st, "SessionStore", model.SymbolInterface); iface.SymbolType != model.SymbolInterface {
+		t.Errorf("interface record = %+v", iface)
 	}
-
-	cRec, err := st.Get("read_session_header")
-	if err != nil {
-		t.Fatalf("c record lookup: %v", err)
+	if c := lookupOne(t, st, "StatusPending", model.SymbolConstant); !strings.Contains(c.SourceCode, "iota") {
+		t.Errorf("const block was not cached: %q", c.SourceCode)
 	}
-	if cRec.RepoName != "packet-router-c" || cRec.Language != model.LanguageC {
-		t.Fatalf("unexpected c record: %+v", cRec)
-	}
-	if !strings.Contains(cRec.SourceCode, "memcpy(out, frame, HEADER_BYTES);") {
-		t.Fatalf("c source body was not isolated: %q", cRec.SourceCode)
+	if alias := lookupOne(t, st, "AccountID", model.SymbolTypeAlias); alias.Signature != "type AccountID = string" {
+		t.Errorf("type alias signature = %q", alias.Signature)
 	}
 
-	// The receiver-qualified alias must also resolve.
-	if _, err := st.Get("Issuer.Issue"); err != nil {
-		t.Fatalf("method alias lookup: %v", err)
+	// C constructs.
+	macro := lookupOne(t, st, "ROUTER_QUEUE_DEPTH", model.SymbolMacro)
+	if macro.RepoName != "packet-router-c" || macro.Language != model.LanguageC {
+		t.Errorf("unexpected macro provenance: %+v", macro)
+	}
+	if fnMacro := lookupOne(t, st, "ROUTER_MIN", model.SymbolMacroFunction); fnMacro.Signature != "#define ROUTER_MIN(a, b)" {
+		t.Errorf("macro function signature = %q", fnMacro.Signature)
+	}
+	if rec := lookupOne(t, st, "router_ops", model.SymbolStruct); !strings.Contains(rec.SourceCode, "(*open)") {
+		t.Errorf("v-table body was not cached: %q", rec.SourceCode)
+	}
+	if td := lookupOne(t, st, "router_status_t", model.SymbolTypedef); td.SymbolType != model.SymbolTypedef {
+		t.Errorf("typedef record = %+v", td)
+	}
+	if e := lookupOne(t, st, "router_priority", model.SymbolEnum); e.SymbolType != model.SymbolEnum {
+		t.Errorf("enum record = %+v", e)
+	}
+	if quota := lookupOne(t, st, "ROUTER_ERR_NO_QUOTA", model.SymbolConstant); quota.ParentScope != "router_status_t" {
+		t.Errorf("enumerator scope = %q", quota.ParentScope)
+	}
+
+	// The Go method must be addressable under both its plain and qualified name.
+	plain := lookupOne(t, st, "Issue")
+	qualified := lookupOne(t, st, "Issuer.Issue")
+	if plain.SourceCode != qualified.SourceCode || qualified.SymbolType != model.SymbolMethod {
+		t.Errorf("method alias did not resolve to the same record: %+v vs %+v", plain, qualified)
 	}
 }
 
-func TestIndexRepoPrunesDeletedFunctions(t *testing.T) {
+func TestIndexRepoIsIncrementalAndInvalidatesRemovedSymbols(t *testing.T) {
 	root := fixtureWorkspace(t)
 	ix, st := newTestIndexer(t, root)
 
-	if _, err := ix.IndexRepo(context.Background(), "auth-service-go"); err != nil {
+	first, err := ix.IndexRepo(context.Background(), "packet-router-c")
+	if err != nil {
 		t.Fatalf("first index: %v", err)
 	}
-
-	trimmed := "package auth\n\n// Issuer mints signed session tokens.\ntype Issuer struct{}\n"
-	if err := os.WriteFile(filepath.Join(root, "auth-service-go", "token.go"), []byte(trimmed), 0o600); err != nil {
-		t.Fatalf("rewrite fixture: %v", err)
+	if first.RecordsWritten == 0 {
+		t.Fatal("the cold index wrote nothing")
 	}
 
-	summary, err := ix.IndexRepo(context.Background(), "auth-service-go")
+	// An unchanged tree must not trigger a single physical write.
+	second, err := ix.IndexRepo(context.Background(), "packet-router-c")
 	if err != nil {
 		t.Fatalf("second index: %v", err)
 	}
-	if summary.RecordsPruned == 0 {
-		t.Fatal("stale records must be pruned after functions disappear")
+	if second.RecordsWritten != 0 {
+		t.Errorf("re-indexing an unchanged repo wrote %d records", second.RecordsWritten)
+	}
+	if second.RecordsPruned != 0 {
+		t.Errorf("re-indexing an unchanged repo pruned %d records", second.RecordsPruned)
 	}
 
-	if _, err := st.Get("ValidateSessionToken"); err == nil {
-		t.Fatal("deleted function must no longer resolve")
+	// Deleting the header must evict every symbol it contributed.
+	if err := os.Remove(filepath.Join(root, "packet-router-c", "router.h")); err != nil {
+		t.Fatalf("remove header: %v", err)
+	}
+	third, err := ix.IndexRepo(context.Background(), "packet-router-c")
+	if err != nil {
+		t.Fatalf("third index: %v", err)
+	}
+	if third.RecordsPruned == 0 {
+		t.Error("deleting a header pruned nothing")
+	}
+	for _, gone := range []string{"ROUTER_QUEUE_DEPTH", "router_ops", "router_status_t", "ROUTER_PRIORITY_LOW"} {
+		if got, _ := st.Lookup(gone, store.Filter{ExactOnly: true}); len(got) != 0 {
+			t.Errorf("symbol %q survived invalidation", gone)
+		}
+	}
+	// Symbols still present in router.c must be untouched.
+	if got, _ := st.Lookup("read_session_header", store.Filter{ExactOnly: true}); len(got) != 1 {
+		t.Error("invalidation removed a live symbol")
 	}
 }
 
-func TestSearchLiveFindsUncachedFunction(t *testing.T) {
+func TestSearchLiveBackfillsTheCache(t *testing.T) {
 	root := fixtureWorkspace(t)
-	ix, _ := newTestIndexer(t, root)
+	ix, st := newTestIndexer(t, root)
 
-	rec, found, err := ix.SearchLive(context.Background(), "route_packet")
+	if got, _ := st.Lookup("read_session_header", store.Filter{ExactOnly: true}); len(got) != 0 {
+		t.Fatal("the cache should start empty")
+	}
+
+	matches, err := ix.SearchLive(context.Background(), "read_session_header", model.CallableTypes)
 	if err != nil {
 		t.Fatalf("live scan: %v", err)
 	}
-	if !found {
-		t.Fatal("route_packet must be discovered by the live fallback scan")
+	if len(matches) != 1 {
+		t.Fatalf("live scan returned %d matches, want 1", len(matches))
 	}
-	if rec.RepoName != "packet-router-c" || rec.Language != model.LanguageC {
-		t.Fatalf("unexpected live scan record: %+v", rec)
-	}
-
-	if _, _, err := ix.SearchLive(context.Background(), "definitely_not_here"); err != nil {
-		t.Fatalf("missing symbol must not error: %v", err)
-	}
-}
-
-func TestValidateRepoNameRejectsTraversal(t *testing.T) {
-	for _, name := range []string{"", ".", "..", "../etc", "auth/../..", `windows\path`, "sub/dir", "-leading"} {
-		if err := ValidateRepoName(name); err == nil {
-			t.Fatalf("repository name %q must be rejected", name)
-		}
-	}
-	for _, name := range []string{"auth-service-go", "packet_router.c1", "svc123"} {
-		if err := ValidateRepoName(name); err != nil {
-			t.Fatalf("repository name %q must be accepted: %v", name, err)
-		}
-	}
-}
-
-func TestSafeRepoPathRejectsEscape(t *testing.T) {
-	root := fixtureWorkspace(t)
-
-	if _, err := SafeRepoPath(root, "../"); err == nil {
-		t.Fatal("parent traversal must be rejected")
-	}
-	if _, err := SafeRepoPath(root, "missing-service"); err == nil {
-		t.Fatal("unknown repository must be rejected")
+	if matches[0].RepoName != "packet-router-c" || matches[0].FilePath != "router.c" {
+		t.Errorf("unexpected live match: %+v", matches[0])
 	}
 
-	got, err := SafeRepoPath(root, "auth-service-go")
+	if got, _ := st.Lookup("read_session_header", store.Filter{ExactOnly: true}); len(got) != 1 {
+		t.Error("the live scan did not back-fill the cache")
+	}
+
+	// A type filter must exclude a callable match.
+	none, err := ix.SearchLive(context.Background(), "read_session_header", []model.SymbolType{model.SymbolStruct})
 	if err != nil {
-		t.Fatalf("valid repository rejected: %v", err)
+		t.Fatalf("filtered live scan: %v", err)
 	}
-	if filepath.Base(got) != "auth-service-go" {
-		t.Fatalf("unexpected resolved path %q", got)
+	if len(none) != 0 {
+		t.Errorf("type filter leaked %d matches", len(none))
 	}
 }
 
-func TestListReposIgnoresSkippedDirectories(t *testing.T) {
+func TestReadSnippetIsBoundedAndContained(t *testing.T) {
 	root := fixtureWorkspace(t)
-	if err := os.MkdirAll(filepath.Join(root, "vendor"), 0o755); err != nil {
-		t.Fatalf("create vendor dir: %v", err)
+	ix, _ := newTestIndexer(t, root)
+
+	snippet, err := ix.ReadSnippet("packet-router-c", "router.c", 1, 4)
+	if err != nil {
+		t.Fatalf("read snippet: %v", err)
+	}
+	if !strings.Contains(snippet, "packet-router-c/router.c:1-4") {
+		t.Errorf("snippet header missing: %q", snippet)
+	}
+	if !strings.Contains(snippet, "#define HEADER_BYTES 32") {
+		t.Errorf("snippet body missing: %q", snippet)
+	}
+	if lines := strings.Count(snippet, "\n"); lines != 5 {
+		t.Errorf("snippet has %d newlines, want 5 (header + 4 lines)", lines)
+	}
+
+	// The range is clamped rather than rejected.
+	long, err := ix.ReadSnippet("packet-router-c", "router.c", 1, 10_000)
+	if err != nil {
+		t.Fatalf("clamped snippet: %v", err)
+	}
+	if strings.Count(long, "\n") > MaxSnippetLines+1 {
+		t.Errorf("snippet exceeded the %d line cap", MaxSnippetLines)
+	}
+
+	for _, bad := range []struct{ repo, path string }{
+		{"packet-router-c", "../auth-service-go/token.go"},
+		{"packet-router-c", "/etc/passwd"},
+		{"../packet-router-c", "router.c"},
+		{"packet-router-c", "missing.c"},
+	} {
+		if _, err := ix.ReadSnippet(bad.repo, bad.path, 1, 5); err == nil {
+			t.Errorf("ReadSnippet(%q, %q) must fail", bad.repo, bad.path)
+		}
+	}
+	if _, err := ix.ReadSnippet("packet-router-c", "router.c", 9, 3); err == nil {
+		t.Error("an inverted line range must be rejected")
+	}
+}
+
+func TestListReposSkipsNonAddressableEntries(t *testing.T) {
+	root := fixtureWorkspace(t)
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "loose.go"), []byte("package x\n"), 0o600); err != nil {
+		t.Fatalf("write loose file: %v", err)
 	}
 
 	ix, _ := newTestIndexer(t, root)
@@ -208,6 +292,39 @@ func TestListReposIgnoresSkippedDirectories(t *testing.T) {
 		t.Fatalf("list repos: %v", err)
 	}
 	if len(repos) != 2 || repos[0] != "auth-service-go" || repos[1] != "packet-router-c" {
-		t.Fatalf("unexpected repository list: %v", repos)
+		t.Fatalf("ListRepos = %v", repos)
+	}
+}
+
+func TestRepoNameValidationRejectsTraversal(t *testing.T) {
+	for _, bad := range []string{"", " ", ".", "..", "../etc", "a/b", `a\b`, "with space", "-leading"} {
+		if err := ValidateRepoName(bad); err == nil {
+			t.Errorf("ValidateRepoName(%q) must fail", bad)
+		}
+	}
+	for _, good := range []string{"nfs-ganesha", "auth-service-go", "repo_1", "Repo.v2"} {
+		if err := ValidateRepoName(good); err != nil {
+			t.Errorf("ValidateRepoName(%q) = %v", good, err)
+		}
+	}
+
+	root := fixtureWorkspace(t)
+	if _, err := SafeRepoPath(root, "packet-router-c"); err != nil {
+		t.Errorf("SafeRepoPath rejected a valid repository: %v", err)
+	}
+	if _, err := SafeRepoPath(root, "does-not-exist"); err == nil {
+		t.Error("SafeRepoPath accepted a missing repository")
+	}
+}
+
+func TestIndexRepoHonoursContextCancellation(t *testing.T) {
+	root := fixtureWorkspace(t)
+	ix, _ := newTestIndexer(t, root)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := ix.IndexRepo(ctx, "packet-router-c"); err == nil {
+		t.Error("IndexRepo ignored a cancelled context")
 	}
 }

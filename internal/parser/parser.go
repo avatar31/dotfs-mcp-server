@@ -2,6 +2,9 @@
 // standard library (go/token, go/parser, go/ast) while C source is handled by
 // the Tree-sitter C grammar. A registry routes each file to the correct engine
 // purely by its extension.
+//
+// Both engines emit the same neutral Symbol value, so the indexer never has to
+// branch on language when populating the cache.
 package parser
 
 import (
@@ -13,23 +16,35 @@ import (
 	"github.com/avatar31/dotfs-mcp-server/internal/model"
 )
 
-// Function is one extracted top-level semantic block.
-type Function struct {
-	// Name is the primary cache key (BadgerDB key "func:<Name>").
+// Symbol is one extracted declaration: a function, macro, struct, interface,
+// typedef, enum or constant.
+type Symbol struct {
+	// Name is the identifier used to build the primary and secondary keys.
 	Name string
-	// Aliases are additional lookup keys, e.g. "Server.Handle" for a Go method
-	// so that both plain and receiver-qualified stack-trace symbols resolve.
+	// Aliases are additional lookup identifiers, e.g. "Server.Handle" for a Go
+	// method so both plain and receiver-qualified stack-trace symbols resolve.
 	Aliases []string
+	// Type is the closed-enumeration declaration kind.
+	Type model.SymbolType
+	// ParentScope names the enclosing declaration: the receiver type of a Go
+	// method, the enum owning a C enumerator, or the const block of a Go
+	// constant. Empty for file-level declarations.
+	ParentScope string
+	// Signature is the one-line declaration header shown before the body.
+	Signature string
 	// Documentation is the boilerplate-free comment block attached to the
-	// function (comment markers already stripped).
+	// declaration (comment markers already stripped).
 	Documentation string
-	// SourceCode is the exact byte scope of the function definition.
+	// SourceCode is the exact byte scope of the declaration.
 	SourceCode string
 	// Language classifies the extraction engine that produced this record.
 	Language model.Language
 	// StartByte / EndByte are the isolated byte offsets inside the source file.
 	StartByte int
 	EndByte   int
+	// StartLine / EndLine are 1-based inclusive line numbers.
+	StartLine int
+	EndLine   int
 }
 
 // Engine is a language-specific structural extractor.
@@ -38,8 +53,8 @@ type Engine interface {
 	Language() model.Language
 	// Extensions lists the lowercase file extensions handled by the engine.
 	Extensions() []string
-	// Parse extracts every top-level function definition from src.
-	Parse(ctx context.Context, path string, src []byte) ([]Function, error)
+	// Parse extracts every top-level declaration from src.
+	Parse(ctx context.Context, path string, src []byte) ([]Symbol, error)
 	// Prefilter is a cheap language-aware rejection test executed in Phase 1
 	// of the "Filter-Then-Parse" algorithm when no target symbol is supplied.
 	Prefilter(src []byte) bool
@@ -126,4 +141,24 @@ func cleanComment(raw string) string {
 		end--
 	}
 	return strings.Join(cleaned[start:end], "\n")
+}
+
+// firstLine collapses a declaration to its opening line, which is what the
+// "signature" field of a record carries.
+func firstLine(src string) string {
+	line, _, _ := strings.Cut(strings.TrimSpace(src), "\n")
+	return strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(line), "{"))
+}
+
+// appendSection attaches a structured extraction summary (embedded types, struct
+// tags, interface methods) underneath the human-written documentation.
+func appendSection(doc, title string, entries []string) string {
+	if len(entries) == 0 {
+		return doc
+	}
+	section := title + ": " + strings.Join(entries, ", ")
+	if strings.TrimSpace(doc) == "" {
+		return section
+	}
+	return doc + "\n\n" + section
 }

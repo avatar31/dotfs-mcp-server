@@ -155,7 +155,7 @@ func (s *Server) runIndexJob(repo string) {
 	s.log.Info("on-demand indexing complete",
 		"repo", repo,
 		"files_parsed", summary.FilesParsed,
-		"functions", summary.FunctionsFound,
+		"symbols", summary.SymbolsFound,
 		"written", summary.RecordsWritten,
 		"pruned", summary.RecordsPruned,
 		"duration_ms", summary.DurationMS,

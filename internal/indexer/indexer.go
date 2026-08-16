@@ -4,6 +4,10 @@
 //
 //	Phase 1  language-agnostic byte scan (bytes.Contains) - cheap rejection
 //	Phase 2  extension-routed AST extraction              - precise isolation
+//
+// Every AST is built, consumed and discarded inside a single parseFile call, so
+// the process never holds an in-memory AST graph for more than the files being
+// parsed concurrently.
 package indexer
 
 import (
@@ -17,6 +21,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,6 +29,13 @@ import (
 	"github.com/avatar31/dotfs-mcp-server/internal/parser"
 	"github.com/avatar31/dotfs-mcp-server/internal/store"
 )
+
+// MaxSnippetLines caps a single read_code_snippet response.
+const MaxSnippetLines = 200
+
+// maxLiveMatches bounds the real-time fallback so a cache miss cannot flood the
+// model context with hundreds of prefix hits.
+const maxLiveMatches = 25
 
 // Options tunes a workspace crawl.
 type Options struct {
@@ -35,15 +47,16 @@ type Options struct {
 
 // Summary is the machine-readable outcome of an indexing cycle.
 type Summary struct {
-	Repo           string `json:"repo"`
-	FilesScanned   int    `json:"files_scanned"`
-	FilesFiltered  int    `json:"files_filtered_out"`
-	FilesParsed    int    `json:"files_parsed"`
-	FunctionsFound int    `json:"functions_found"`
-	RecordsWritten int    `json:"records_written"`
-	RecordsPruned  int    `json:"records_pruned"`
-	ParseErrors    int    `json:"parse_errors"`
-	DurationMS     int64  `json:"duration_ms"`
+	Repo           string         `json:"repo"`
+	FilesScanned   int            `json:"files_scanned"`
+	FilesFiltered  int            `json:"files_filtered_out"`
+	FilesParsed    int            `json:"files_parsed"`
+	SymbolsFound   int            `json:"symbols_found"`
+	SymbolTypes    map[string]int `json:"symbol_types,omitempty"`
+	RecordsWritten int            `json:"records_written"`
+	RecordsPruned  int            `json:"records_pruned"`
+	ParseErrors    int            `json:"parse_errors"`
+	DurationMS     int64          `json:"duration_ms"`
 }
 
 // Indexer crawls repositories and keeps the cache in sync.
@@ -129,13 +142,13 @@ func (ix *Indexer) IndexAll(ctx context.Context) ([]Summary, error) {
 
 // parseResult carries AST output from a worker to the single cache writer.
 type parseResult struct {
-	relPath   string
-	functions []parser.Function
-	err       error
+	relPath string
+	symbols []parser.Symbol
+	err     error
 }
 
-// IndexRepo runs the full Filter-Then-Parse cycle for one repository and prunes
-// cache records whose functions no longer exist in the source tree.
+// IndexRepo runs the full Filter-Then-Parse cycle for one repository and then
+// invalidates every "sym:<repo>:" record that the fresh crawl did not produce.
 func (ix *Indexer) IndexRepo(ctx context.Context, repo string) (Summary, error) {
 	started := time.Now()
 
@@ -149,7 +162,7 @@ func (ix *Indexer) IndexRepo(ctx context.Context, repo string) (Summary, error) 
 		return Summary{}, err
 	}
 
-	summary := Summary{Repo: repo, FilesScanned: scanned}
+	summary := Summary{Repo: repo, FilesScanned: scanned, SymbolTypes: make(map[string]int)}
 
 	results := make(chan parseResult, ix.opts.Workers)
 	jobs := make(chan string)
@@ -185,40 +198,33 @@ func (ix *Indexer) IndexRepo(ctx context.Context, repo string) (Summary, error) 
 
 	// A single writer goroutine (this one) keeps BadgerDB transactions free of
 	// write-write conflicts while readers from the LLM client stay unblocked.
-	seen := make(map[string]struct{})
+	live := make(map[string]struct{})
 	for res := range results {
 		switch {
 		case res.err != nil:
 			summary.ParseErrors++
 			ix.log.Warn("parse failure", "repo", repo, "file", res.relPath, "error", res.err)
 			continue
-		case res.functions == nil:
+		case res.symbols == nil:
 			summary.FilesFiltered++
 			continue
 		}
 
 		summary.FilesParsed++
-		summary.FunctionsFound += len(res.functions)
+		summary.SymbolsFound += len(res.symbols)
 
-		for _, fn := range res.functions {
-			rec := model.FunctionRecord{
-				RepoName:      repo,
-				FilePath:      filepath.ToSlash(filepath.Join(repo, res.relPath)),
-				Language:      fn.Language,
-				Documentation: fn.Documentation,
-				SourceCode:    fn.SourceCode,
+		for _, sym := range res.symbols {
+			rec := toRecord(repo, res.relPath, sym)
+			key, written, err := ix.store.PutSymbol(rec)
+			if err != nil {
+				summary.ParseErrors++
+				ix.log.Error("cache write failed", "repo", repo, "symbol", sym.Name, "error", err)
+				continue
 			}
-			for _, key := range append([]string{fn.Name}, fn.Aliases...) {
-				written, err := ix.store.Put(key, rec)
-				if err != nil {
-					summary.ParseErrors++
-					ix.log.Error("cache write failed", "repo", repo, "function", key, "error", err)
-					continue
-				}
-				seen[key] = struct{}{}
-				if written {
-					summary.RecordsWritten++
-				}
+			live[key] = struct{}{}
+			summary.SymbolTypes[string(sym.Type)]++
+			if written {
+				summary.RecordsWritten++
 			}
 		}
 	}
@@ -227,7 +233,7 @@ func (ix *Indexer) IndexRepo(ctx context.Context, repo string) (Summary, error) 
 		return summary, err
 	}
 
-	pruned, err := ix.pruneStale(repo, seen)
+	pruned, err := ix.store.PruneRepo(repo, live)
 	if err != nil {
 		return summary, err
 	}
@@ -238,7 +244,7 @@ func (ix *Indexer) IndexRepo(ctx context.Context, repo string) (Summary, error) 
 		"repo", repo,
 		"files_scanned", summary.FilesScanned,
 		"files_parsed", summary.FilesParsed,
-		"functions", summary.FunctionsFound,
+		"symbols", summary.SymbolsFound,
 		"written", summary.RecordsWritten,
 		"pruned", summary.RecordsPruned,
 		"errors", summary.ParseErrors,
@@ -247,15 +253,41 @@ func (ix *Indexer) IndexRepo(ctx context.Context, repo string) (Summary, error) 
 	return summary, nil
 }
 
+// toRecord projects a parsed symbol onto the persisted cache schema. file_path
+// is repository-relative, so no host path ever reaches the model.
+func toRecord(repo, relPath string, sym parser.Symbol) model.SymbolRecord {
+	return model.SymbolRecord{
+		RepoName:      repo,
+		FilePath:      filepath.ToSlash(relPath),
+		Language:      sym.Language,
+		SymbolType:    sym.Type,
+		Name:          sym.Name,
+		Aliases:       sym.Aliases,
+		ParentScope:   sym.ParentScope,
+		StartByte:     sym.StartByte,
+		EndByte:       sym.EndByte,
+		StartLine:     sym.StartLine,
+		EndLine:       sym.EndLine,
+		Documentation: sym.Documentation,
+		Signature:     sym.Signature,
+		SourceCode:    sym.SourceCode,
+	}
+}
+
 // SearchLive is the real-time fallback used when the cache misses: it applies
 // Phase 1 (bytes.Contains) across the workspace and only pays for Phase 2 on
 // files that literally contain the token. Matches are written back to cache.
-func (ix *Indexer) SearchLive(ctx context.Context, target string) (model.FunctionRecord, bool, error) {
+func (ix *Indexer) SearchLive(ctx context.Context, target string, types []model.SymbolType) ([]model.SymbolRecord, error) {
 	repos, err := ix.ListRepos()
 	if err != nil {
-		return model.FunctionRecord{}, false, err
+		return nil, err
+	}
+	allowed := make(map[model.SymbolType]struct{}, len(types))
+	for _, t := range types {
+		allowed[t] = struct{}{}
 	}
 
+	var matches []model.SymbolRecord
 	for _, repo := range repos {
 		repoPath, err := SafeRepoPath(ix.opts.WorkspaceRoot, repo)
 		if err != nil {
@@ -264,12 +296,12 @@ func (ix *Indexer) SearchLive(ctx context.Context, target string) (model.Functio
 		}
 		files, _, err := ix.collectFiles(ctx, repoPath)
 		if err != nil {
-			return model.FunctionRecord{}, false, err
+			return nil, err
 		}
 
 		for _, path := range files {
 			if err := ctx.Err(); err != nil {
-				return model.FunctionRecord{}, false, err
+				return matches, err
 			}
 
 			res := ix.parseFile(ctx, repoPath, path, target)
@@ -278,32 +310,34 @@ func (ix *Indexer) SearchLive(ctx context.Context, target string) (model.Functio
 				continue
 			}
 
-			for _, fn := range res.functions {
-				if !matchesName(fn, target) {
+			for _, sym := range res.symbols {
+				if !matchesName(sym, target) {
 					continue
 				}
-				rec := model.FunctionRecord{
-					RepoName:      repo,
-					FilePath:      filepath.ToSlash(filepath.Join(repo, res.relPath)),
-					Language:      fn.Language,
-					Documentation: fn.Documentation,
-					SourceCode:    fn.SourceCode,
+				if len(allowed) > 0 {
+					if _, ok := allowed[sym.Type]; !ok {
+						continue
+					}
 				}
-				if _, err := ix.store.Put(target, rec); err != nil {
-					ix.log.Error("failed to cache live scan hit", "function", target, "error", err)
+				rec := toRecord(repo, res.relPath, sym)
+				if _, _, err := ix.store.PutSymbol(rec); err != nil {
+					ix.log.Error("failed to cache live scan hit", "symbol", sym.Name, "error", err)
 				}
-				return rec, true, nil
+				matches = append(matches, rec)
+				if len(matches) >= maxLiveMatches {
+					return matches, nil
+				}
 			}
 		}
 	}
-	return model.FunctionRecord{}, false, nil
+	return matches, nil
 }
 
-func matchesName(fn parser.Function, target string) bool {
-	if fn.Name == target {
+func matchesName(sym parser.Symbol, target string) bool {
+	if sym.Name == target {
 		return true
 	}
-	for _, alias := range fn.Aliases {
+	for _, alias := range sym.Aliases {
 		if alias == target {
 			return true
 		}
@@ -311,8 +345,72 @@ func matchesName(fn parser.Function, target string) bool {
 	return false
 }
 
-// parseFile executes Phase 1 then Phase 2 for a single file. A nil function
-// slice with a nil error means the file was rejected by the Phase 1 filter.
+// ReadSnippet returns the requested inclusive line range of a repository file,
+// prefixed with line numbers. The range is clamped to MaxSnippetLines and the
+// resolved path is proven to stay inside the repository directory.
+func (ix *Indexer) ReadSnippet(repo, relPath string, startLine, endLine int) (string, error) {
+	repoPath, err := SafeRepoPath(ix.opts.WorkspaceRoot, repo)
+	if err != nil {
+		return "", err
+	}
+	if startLine < 1 {
+		startLine = 1
+	}
+	if endLine < startLine {
+		return "", fmt.Errorf("end_line (%d) must not precede start_line (%d)", endLine, startLine)
+	}
+	if endLine-startLine+1 > MaxSnippetLines {
+		endLine = startLine + MaxSnippetLines - 1
+	}
+
+	clean := filepath.Clean(filepath.FromSlash(strings.TrimPrefix(relPath, "/")))
+	if clean == "." || strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
+		return "", fmt.Errorf("file_path %q is not a repository-relative path", relPath)
+	}
+
+	target := filepath.Join(repoPath, clean)
+	real, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s/%s: %w", repo, relPath, err)
+	}
+	if !isWithin(repoPath, real) {
+		return "", fmt.Errorf("file_path %q resolves outside repository %q", relPath, repo)
+	}
+
+	info, err := os.Stat(real)
+	if err != nil {
+		return "", fmt.Errorf("stat %s/%s: %w", repo, relPath, err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("%s/%s is a directory", repo, relPath)
+	}
+	if info.Size() > ix.opts.MaxFileSize {
+		return "", fmt.Errorf("%s/%s is larger than the %d byte read limit", repo, relPath, ix.opts.MaxFileSize)
+	}
+
+	src, err := os.ReadFile(real)
+	if err != nil {
+		return "", fmt.Errorf("read %s/%s: %w", repo, relPath, err)
+	}
+
+	lines := strings.Split(strings.ReplaceAll(string(src), "\r\n", "\n"), "\n")
+	if startLine > len(lines) {
+		return "", fmt.Errorf("start_line %d is past the end of %s/%s (%d lines)", startLine, repo, relPath, len(lines))
+	}
+	if endLine > len(lines) {
+		endLine = len(lines)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s/%s:%d-%d\n", repo, filepath.ToSlash(clean), startLine, endLine)
+	for i := startLine; i <= endLine; i++ {
+		fmt.Fprintf(&b, "%6d | %s\n", i, lines[i-1])
+	}
+	return b.String(), nil
+}
+
+// parseFile executes Phase 1 then Phase 2 for a single file. A nil symbol slice
+// with a nil error means the file was rejected by the Phase 1 filter.
 func (ix *Indexer) parseFile(ctx context.Context, repoPath, path, target string) parseResult {
 	rel, err := filepath.Rel(repoPath, path)
 	if err != nil {
@@ -340,15 +438,15 @@ func (ix *Indexer) parseFile(ctx context.Context, repoPath, path, target string)
 	}
 
 	// ---- Phase 2: routing-aware AST extraction ------------------------------
-	functions, err := engine.Parse(ctx, path, src)
+	symbols, err := engine.Parse(ctx, path, src)
 	if err != nil {
 		return parseResult{relPath: rel, err: err}
 	}
-	if functions == nil {
+	if symbols == nil {
 		// Distinguish "parsed, nothing found" from "filtered out" for the caller.
-		functions = []parser.Function{}
+		symbols = []parser.Symbol{}
 	}
-	return parseResult{relPath: rel, functions: functions}
+	return parseResult{relPath: rel, symbols: symbols}
 }
 
 // collectFiles walks a repository and returns every parseable file path
@@ -398,20 +496,4 @@ func (ix *Indexer) collectFiles(ctx context.Context, repoPath string) ([]string,
 		return nil, scanned, fmt.Errorf("walk repository %q: %w", repoPath, err)
 	}
 	return files, scanned, nil
-}
-
-// pruneStale evicts cache entries for functions that vanished from the repo.
-func (ix *Indexer) pruneStale(repo string, seen map[string]struct{}) (int, error) {
-	cached, err := ix.store.ListRepoFunctions(repo)
-	if err != nil {
-		return 0, err
-	}
-
-	var stale []string
-	for _, name := range cached {
-		if _, ok := seen[name]; !ok {
-			stale = append(stale, name)
-		}
-	}
-	return ix.store.PruneRepo(repo, stale)
 }

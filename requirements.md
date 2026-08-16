@@ -15,7 +15,9 @@ The system is built on a clear separation of concerns across four major componen
 | Dual AST Parser Layer | Structural Blueprint Reader | Statically parses raw code into an Abstract Syntax Tree (AST). It uses Tree-sitter for C files and Go's native standard library packages (go/parser, go/ast) for Go files to extract structural semantic blocks (functions, structs, docstrings). |
 | Caching Layer (BadgerDB) | High-Speed Storage | Local embedded key-value database running inside the Go runtime process. Persists fully-parsed multi-language AST information, repository mapping, and semantic context between server reboots for microsecond execution. |
 
-## 3. Core Technical Requirements## 3.1 Codebase Parsing & AST Isolation (Dual Engine Architecture)
+## 3. Core Technical Requirements
+
+## 3.1 Codebase Parsing & AST Isolation (Dual Engine Architecture)
 The parser layer must inspect file extensions and dynamically route files to the appropriate AST compiler:
 
 * C Parser Engine (.c, .h files):

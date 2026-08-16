@@ -26,9 +26,11 @@ type Profile struct {
 // package decoupled from the storage layer.
 type Observation struct {
 	Indexed       bool
+	SymbolCount   int
 	FunctionCount int
 	FileCount     int
 	Languages     map[string]int
+	SymbolTypes   map[string]int
 	Samples       []string
 }
 
@@ -132,13 +134,39 @@ func (m *Matrix) Describe(repo string, obs Observation) string {
 		return b.String()
 	}
 
-	fmt.Fprintf(&b, "- Cached functions: %d\n", obs.FunctionCount)
+	fmt.Fprintf(&b, "- Cached symbols: %d (functions and methods: %d)\n", obs.SymbolCount, obs.FunctionCount)
 	fmt.Fprintf(&b, "- Source files carrying cached symbols: %d\n", obs.FileCount)
-	if len(obs.Samples) > 0 {
-		fmt.Fprintf(&b, "- Representative entry points: %s\n", strings.Join(obs.Samples, ", "))
+	if breakdown := symbolBreakdown(obs.SymbolTypes); breakdown != "" {
+		fmt.Fprintf(&b, "- Declaration mix: %s\n", breakdown)
 	}
-	b.WriteString("\nUse global_codebase_search with any of the symbols above to retrieve the exact source body and documentation.\n")
+	if len(obs.Samples) > 0 {
+		fmt.Fprintf(&b, "- Representative declarations: %s\n", strings.Join(obs.Samples, ", "))
+	}
+	b.WriteString("\nUse lookup_symbol, get_type_definition or lookup_macro_or_const with any of the ")
+	b.WriteString("declarations above to retrieve the exact source body and documentation.\n")
 	return b.String()
+}
+
+// symbolBreakdown renders "struct (12), macro (8)" in descending frequency.
+func symbolBreakdown(types map[string]int) string {
+	if len(types) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(types))
+	for k := range types {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if types[keys[i]] != types[keys[j]] {
+			return types[keys[i]] > types[keys[j]]
+		}
+		return keys[i] < keys[j]
+	})
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s (%d)", k, types[k]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // languageStack renders "go (42 symbols), c (17 symbols)" deterministically.
