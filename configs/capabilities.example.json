@@ -1,0 +1,34 @@
+[
+  {
+    "repo": "auth-service-go",
+    "language": "Go 1.22 (net/http, HMAC session tokens)",
+    "summary": "Issues and validates opaque session tokens for every edge request and owns the account identity lookup path.",
+    "features": [
+      "Session token issuance and HMAC verification",
+      "Account identity resolution",
+      "Token expiry and revocation bookkeeping"
+    ],
+    "interfaces": [
+      "HTTP: POST /v1/session (issue), GET /v1/session (introspect)",
+      "Binary: 32-byte session header shared with packet-router-c"
+    ],
+    "owners": ["identity-platform"],
+    "criticality": "tier-1"
+  },
+  {
+    "repo": "packet-router-c",
+    "language": "C11 (POSIX sockets, static linking)",
+    "summary": "Terminates raw client frames, parses the shared session header and dispatches work to downstream queues.",
+    "features": [
+      "Zero-copy frame ingestion",
+      "Session header parsing",
+      "Worker queue dispatch and backpressure"
+    ],
+    "interfaces": [
+      "Binary: 32-byte session header shared with auth-service-go",
+      "Unix domain socket: /run/packet-router.sock"
+    ],
+    "owners": ["network-systems"],
+    "criticality": "tier-1"
+  }
+]

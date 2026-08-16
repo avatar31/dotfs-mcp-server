@@ -178,4 +178,3 @@ func TestListReposReportsIndexingState(t *testing.T) {
 		t.Fatal("no cycle is running, indexing must be false")
 	}
 }
-

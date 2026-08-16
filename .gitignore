@@ -1,0 +1,14 @@
+# Build artefacts
+/bin/
+
+# Local embedded cache
+/agent_knowledge/
+*.vlog
+*.sst
+
+# Local workspace mount point
+/workspace/
+
+# Local configuration
+/configs/capabilities.json
+.env

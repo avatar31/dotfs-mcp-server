@@ -227,6 +227,53 @@ func (s *Store) PruneRepo(repo string, stale []string) (int, error) {
 	return removed, nil
 }
 
+// Stats walks the primary keyspace and aggregates per-repository metrics used
+// by the list_repo_capabilities tool.
+func (s *Store) Stats() (map[string]RepoStat, error) {
+	stats := make(map[string]RepoStat)
+	prefix := []byte(funcPrefix)
+
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			item := it.Item()
+			name := strings.TrimPrefix(string(item.Key()), funcPrefix)
+
+			var rec model.FunctionRecord
+			if err := item.Value(func(val []byte) error {
+				return json.Unmarshal(val, &rec)
+			}); err != nil {
+				return err
+			}
+
+			stat, ok := stats[rec.RepoName]
+			if !ok {
+				stat = RepoStat{
+					RepoName:  rec.RepoName,
+					Languages: make(map[string]int),
+					Files:     make(map[string]int),
+				}
+			}
+			stat.Functions++
+			stat.Languages[string(rec.Language)]++
+			stat.Files[rec.FilePath]++
+			if len(stat.Samples) < 12 {
+				stat.Samples = append(stat.Samples, name)
+			}
+			stats[rec.RepoName] = stat
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("aggregate cache statistics: %w", err)
+	}
+	return stats, nil
+}
+
 // badgerLogger adapts BadgerDB's logging interface onto slog.
 //
 // This matters for correctness, not just tidiness: the MCP transport owns

@@ -8,16 +8,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	mcpsrv "github.com/mark3labs/mcp-go/server"
+
 	"github.com/avatar31/dotfs-mcp-server/internal/capabilities"
 	"github.com/avatar31/dotfs-mcp-server/internal/config"
 	"github.com/avatar31/dotfs-mcp-server/internal/httpapi"
 	"github.com/avatar31/dotfs-mcp-server/internal/indexer"
+	"github.com/avatar31/dotfs-mcp-server/internal/mcpserver"
 	"github.com/avatar31/dotfs-mcp-server/internal/parser"
 	"github.com/avatar31/dotfs-mcp-server/internal/store"
 )
@@ -71,7 +75,7 @@ func run() error {
 		return err
 	}
 
-	_, err = capabilities.Load(cfg.CapabilitiesFile)
+	matrix, err := capabilities.Load(cfg.CapabilitiesFile)
 	if err != nil {
 		return err
 	}
@@ -105,10 +109,33 @@ func run() error {
 		go func() { apiErrCh <- api.ListenAndServe() }()
 	}
 
+	mcpServer, err := mcpserver.New(mcpserver.Deps{
+		Cache:    cache,
+		Scanner:  idx,
+		Matrix:   matrix,
+		Log:      logger.With("component", "mcp"),
+		Name:     cfg.ServerName,
+		Version:  cfg.ServerVersion,
+		LiveScan: true,
+	})
+	if err != nil {
+		return err
+	}
+
+	stdio := mcpsrv.NewStdioServer(mcpServer)
+	stdio.SetErrorLogger(log.New(os.Stderr, "mcp-stdio ", log.LstdFlags))
+
+	serveErrCh := make(chan error, 1)
+	go func() { serveErrCh <- stdio.Listen(ctx, os.Stdin, os.Stdout) }()
+
 	var runErr error
 	select {
 	case <-ctx.Done():
 		logger.Info("shutdown signal received")
+	case err := <-serveErrCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			runErr = fmt.Errorf("mcp stdio transport: %w", err)
+		}
 	case err := <-apiErrCh:
 		if err != nil {
 			runErr = err

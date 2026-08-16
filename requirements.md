@@ -30,7 +30,7 @@ The parser layer must inspect file extensions and dynamically route files to the
 
 ## 3.2 Caching Requirements (BadgerDB Data Layout)
 
-* Storage Type: Embedded, LSM tree-based key-value store running on disk locally (./mcp_cache_db).
+* Storage Type: Embedded, LSM tree-based key-value store running on disk locally (./agent_knowledge).
 * Schema Design:
 * Key Format: func:<function_name> (e.g., func:process_payment)
    * Value Schema: Structured JSON metadata blob updated to include a mandatory language classification tag.
