@@ -6,12 +6,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/avatar31/dotfs-mcp-server/internal/capabilities"
 	"github.com/avatar31/dotfs-mcp-server/internal/config"
 	"github.com/avatar31/dotfs-mcp-server/internal/indexer"
 	"github.com/avatar31/dotfs-mcp-server/internal/parser"
@@ -58,7 +61,7 @@ func run() error {
 	registry := parser.NewDefaultRegistry()
 	logger.Debug("parser engines registered", "extensions", registry.Extensions())
 
-	_, err = indexer.New(cache, registry, logger, indexer.Options{
+	idx, err := indexer.New(cache, registry, logger, indexer.Options{
 		WorkspaceRoot: cfg.WorkspaceRoot,
 		MaxFileSize:   cfg.MaxFileSize,
 		SkipDirs:      cfg.SkipDirs,
@@ -67,6 +70,26 @@ func run() error {
 		return err
 	}
 
+	_, err = capabilities.Load(cfg.CapabilitiesFile)
+	if err != nil {
+		return err
+	}
+
+	if cfg.IndexOnStart {
+		// Indexing runs asynchronously so the MCP handshake is never delayed by
+		// a cold cache on a large workspace.
+		go func() {
+			summaries, err := idx.IndexAll(ctx)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("initial workspace index failed", "error", err)
+				return
+			}
+			logger.Info("initial workspace index complete", "repositories", len(summaries))
+		}()
+	}
+
+	gcDone := startValueLogGC(ctx, cache, logger, cfg.GCInterval)
+
 	var runErr error
 	select {
 	case <-ctx.Done():
@@ -74,9 +97,33 @@ func run() error {
 	}
 
 	stop() // cancel the root context, which stops all background workers
+	<-gcDone
 
 	logger.Info("dotfs-mcp-server stopped")
 	return runErr
+}
+
+// startValueLogGC periodically reclaims BadgerDB value-log space and returns a
+// channel closed once the collector has stopped.
+func startValueLogGC(ctx context.Context, cache *store.Store, logger *slog.Logger, every time.Duration) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := cache.RunValueLogGC(0.7); err != nil {
+					logger.Warn("cache garbage collection failed", "error", err)
+				}
+			}
+		}
+	}()
+	return done
 }
 
 // newLogger builds the structured logger. It writes to stderr because stdout is

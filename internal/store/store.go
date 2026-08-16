@@ -11,11 +11,13 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 
+	"github.com/avatar31/dotfs-mcp-server/internal/model"
 	"github.com/dgraph-io/badger/v4"
 )
 
@@ -76,14 +78,131 @@ func (s *Store) RunValueLogGC(discardRatio float64) error {
 }
 
 // FunctionKey builds the primary cache key for a function name.
+// func:<function_name> is the primary key for a function record.
 func FunctionKey(name string) []byte { return []byte(funcPrefix + name) }
 
+// idx:<repo_name>:<function_name> is the secondary index key for a function name.
 func repoIndexKey(repo, name string) []byte {
 	return []byte(idxPrefix + repo + ":" + name)
 }
 
+// idx:<repo_name>: is the prefix for all secondary index keys for a repository.
 func repoIndexPrefix(repo string) []byte {
 	return []byte(idxPrefix + repo + ":")
+}
+
+// Put writes a record only when it differs from the cached copy (structural
+// delta check) and keeps the repository ownership index in sync. It reports
+// whether a physical write occurred.
+func (s *Store) Put(name string, rec model.FunctionRecord) (bool, error) {
+	if strings.TrimSpace(name) == "" {
+		return false, fmt.Errorf("refusing to cache a record with an empty function name")
+	}
+	if err := rec.Validate(); err != nil {
+		return false, fmt.Errorf("invalid record for %q: %w", name, err)
+	}
+
+	payload, err := json.Marshal(rec)
+	if err != nil {
+		return false, fmt.Errorf("marshal record for %q: %w", name, err)
+	}
+
+	changed := false
+	err = s.db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(FunctionKey(name))
+		switch {
+		case err == nil:
+			var existing model.FunctionRecord
+			if verr := item.Value(func(val []byte) error {
+				return json.Unmarshal(val, &existing)
+			}); verr == nil && existing.Fingerprint() == rec.Fingerprint() {
+				// No structural delta: keep the index fresh and skip the write.
+				return txn.Set(repoIndexKey(rec.RepoName, name), nil)
+			}
+		case errors.Is(err, badger.ErrKeyNotFound):
+		default:
+			return err
+		}
+
+		if err := txn.Set(FunctionKey(name), payload); err != nil {
+			return err
+		}
+		if err := txn.Set(repoIndexKey(rec.RepoName, name), nil); err != nil {
+			return err
+		}
+		changed = true
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("cache function %q: %w", name, err)
+	}
+	return changed, nil
+}
+
+// ListRepoFunctions returns every function name currently attributed to repo.
+func (s *Store) ListRepoFunctions(repo string) ([]string, error) {
+	prefix := repoIndexPrefix(repo)
+	var names []string
+
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			names = append(names, strings.TrimPrefix(string(it.Item().Key()), string(prefix)))
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list functions for repo %q: %w", repo, err)
+	}
+	return names, nil
+}
+
+// PruneRepo removes index entries (and their primary records when still owned
+// by repo) for every stale function name. It is used after a re-index cycle to
+// evict functions that disappeared from the source tree.
+func (s *Store) PruneRepo(repo string, stale []string) (int, error) {
+	if len(stale) == 0 {
+		return 0, nil
+	}
+	removed := 0
+	err := s.db.Update(func(txn *badger.Txn) error {
+		for _, name := range stale {
+			if err := txn.Delete(repoIndexKey(repo, name)); err != nil {
+				return err
+			}
+			item, err := txn.Get(FunctionKey(name))
+			if errors.Is(err, badger.ErrKeyNotFound) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			var rec model.FunctionRecord
+			if err := item.Value(func(val []byte) error {
+				return json.Unmarshal(val, &rec)
+			}); err != nil {
+				return err
+			}
+			// Another repository may have taken ownership of the key meanwhile.
+			if rec.RepoName != repo {
+				continue
+			}
+			if err := txn.Delete(FunctionKey(name)); err != nil {
+				return err
+			}
+			removed++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("prune repo %q: %w", repo, err)
+	}
+	return removed, nil
 }
 
 // badgerLogger adapts BadgerDB's logging interface onto slog.

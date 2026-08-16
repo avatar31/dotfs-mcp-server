@@ -6,6 +6,7 @@ package parser
 
 import (
 	"context"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -63,6 +64,18 @@ func NewRegistry(engines ...Engine) *Registry {
 // NewDefaultRegistry wires the Go and C engines mandated by the specification.
 func NewDefaultRegistry() *Registry {
 	return NewRegistry(NewGoEngine(), NewCEngine())
+}
+
+// For resolves the engine responsible for path, if any.
+func (r *Registry) For(path string) (Engine, bool) {
+	e, ok := r.byExt[strings.ToLower(filepath.Ext(path))]
+	return e, ok
+}
+
+// Supports reports whether path is parseable by any registered engine.
+func (r *Registry) Supports(path string) bool {
+	_, ok := r.For(path)
+	return ok
 }
 
 // Extensions returns the sorted set of handled extensions (diagnostics only).
