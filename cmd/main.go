@@ -16,6 +16,7 @@ import (
 
 	"github.com/avatar31/dotfs-mcp-server/internal/capabilities"
 	"github.com/avatar31/dotfs-mcp-server/internal/config"
+	"github.com/avatar31/dotfs-mcp-server/internal/httpapi"
 	"github.com/avatar31/dotfs-mcp-server/internal/indexer"
 	"github.com/avatar31/dotfs-mcp-server/internal/parser"
 	"github.com/avatar31/dotfs-mcp-server/internal/store"
@@ -90,13 +91,38 @@ func run() error {
 
 	gcDone := startValueLogGC(ctx, cache, logger, cfg.GCInterval)
 
+	var api *httpapi.Server
+	apiErrCh := make(chan error, 1)
+	if cfg.EnableHTTP {
+		api, err = httpapi.New(ctx, httpapi.Config{
+			Addr:          cfg.HTTPAddr,
+			APIToken:      cfg.APIToken,
+			WorkspaceRoot: cfg.WorkspaceRoot,
+		}, idx, logger.With("component", "httpapi"))
+		if err != nil {
+			return err
+		}
+		go func() { apiErrCh <- api.ListenAndServe() }()
+	}
+
 	var runErr error
 	select {
 	case <-ctx.Done():
 		logger.Info("shutdown signal received")
+	case err := <-apiErrCh:
+		if err != nil {
+			runErr = err
+		}
 	}
 
 	stop() // cancel the root context, which stops all background workers
+	if api != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := api.Shutdown(shutdownCtx); err != nil {
+			logger.Error("management API shutdown failed", "error", err)
+		}
+	}
 	<-gcDone
 
 	logger.Info("dotfs-mcp-server stopped")

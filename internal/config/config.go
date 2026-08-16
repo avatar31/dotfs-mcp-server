@@ -17,7 +17,7 @@ import (
 // Default values applied when the matching environment variable is unset.
 const (
 	DefaultWorkspaceRoot = "./workspace"
-	DefaultCacheDir      = "./mcp_cache_db"
+	DefaultCacheDir      = "./agent_knowledge"
 	DefaultHTTPAddr      = "127.0.0.1:8080"
 	DefaultMaxFileSize   = 2 << 20 // 2 MiB
 	DefaultServerName    = "dotfs-mcp-server"
