@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/avatar31/dotfs-mcp-server/internal/lsp"
 )
 
 // Default values applied when the matching environment variable is unset.
@@ -53,6 +55,21 @@ type Config struct {
 	// ServerName / ServerVersion are advertised during the MCP handshake.
 	ServerName    string
 	ServerVersion string
+
+	// LSPEnabled toggles the Phase 3 cross-reference engine. When false the
+	// four relational tools are not advertised to the MCP client at all.
+	LSPEnabled bool
+	// GoplsPath / ClangdPath are executable names resolved through $PATH, or
+	// absolute paths to a pinned build.
+	GoplsPath  string
+	ClangdPath string
+	// ClangdArgs are appended to the generated clangd command line.
+	ClangdArgs []string
+	// LSPTimeout bounds a single language-server round trip.
+	LSPTimeout time.Duration
+	// LSPInitTimeout bounds the initialize handshake of a cold daemon, which
+	// has to load an entire module or compilation database before answering.
+	LSPInitTimeout time.Duration
 }
 
 // Load reads the environment, applies defaults and validates the result.
@@ -66,6 +83,9 @@ func Load() (Config, error) {
 		LogLevel:         envString("DOTFS_LOG_LEVEL", "info"),
 		ServerName:       envString("DOTFS_SERVER_NAME", DefaultServerName),
 		ServerVersion:    envString("DOTFS_SERVER_VERSION", DefaultServerVersion),
+		GoplsPath:        envString("DOTFS_GOPLS_PATH", lsp.DefaultGoplsPath),
+		ClangdPath:       envString("DOTFS_CLANGD_PATH", lsp.DefaultClangdPath),
+		ClangdArgs:       envList("DOTFS_CLANGD_ARGS", nil),
 		SkipDirs:         envList("DOTFS_SKIP_DIRS", []string{".git", ".svn", ".hg", "node_modules", "vendor", "third_party", "build", "dist", "out", ".idea", ".vscode"}),
 	}
 

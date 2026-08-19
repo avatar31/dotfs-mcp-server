@@ -21,9 +21,11 @@ import (
 	"github.com/avatar31/dotfs-mcp-server/internal/config"
 	"github.com/avatar31/dotfs-mcp-server/internal/httpapi"
 	"github.com/avatar31/dotfs-mcp-server/internal/indexer"
+	"github.com/avatar31/dotfs-mcp-server/internal/lsp"
 	"github.com/avatar31/dotfs-mcp-server/internal/mcpserver"
 	"github.com/avatar31/dotfs-mcp-server/internal/parser"
 	"github.com/avatar31/dotfs-mcp-server/internal/store"
+	"github.com/avatar31/dotfs-mcp-server/internal/xref"
 )
 
 func main() {
@@ -109,6 +111,14 @@ func run() error {
 		go func() { apiErrCh <- api.ListenAndServe() }()
 	}
 
+	// Phase 3: the language-server pool is created eagerly but spawns nothing
+	// until a relational tool is actually called.
+	_, closeLSP, err := startCrossReference(cfg, logger)
+	if err != nil {
+		return err
+	}
+	defer closeLSP()
+
 	mcpServer, err := mcpserver.New(mcpserver.Deps{
 		Cache:    cache,
 		Scanner:  idx,
@@ -154,6 +164,46 @@ func run() error {
 
 	logger.Info("dotfs-mcp-server stopped")
 	return runErr
+}
+
+// startCrossReference builds the Phase 3 engine and returns it together with a
+// teardown func. A nil service is returned - and the relational tools are then
+// never registered - whenever the engine is switched off.
+func startCrossReference(cfg config.Config, logger *slog.Logger) (mcpserver.CrossReference, func(), error) {
+	if !cfg.LSPEnabled {
+		logger.Info("cross-reference engine disabled", "reason", "DOTFS_LSP_ENABLED=false")
+		return nil, func() {}, nil
+	}
+
+	manager := lsp.NewManager(lsp.Config{
+		Enabled:        true,
+		GoplsPath:      cfg.GoplsPath,
+		ClangdPath:     cfg.ClangdPath,
+		ClangdArgs:     cfg.ClangdArgs,
+		RequestTimeout: cfg.LSPTimeout,
+		InitTimeout:    cfg.LSPInitTimeout,
+		ClientName:     cfg.ServerName,
+		ClientVersion:  cfg.ServerVersion,
+	}, logger.With("component", "lsp"))
+
+	service, err := xref.New(xref.FromManager(manager), cfg.WorkspaceRoot, logger.With("component", "xref"))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	logger.Info("cross-reference engine ready",
+		"gopls", cfg.GoplsPath, "clangd", cfg.ClangdPath, "request_timeout", cfg.LSPTimeout)
+
+	shutdown := func() {
+		// Detached from the root context, which is already cancelled by now:
+		// the daemons still need a window to exit before they are killed.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := manager.Close(ctx); err != nil {
+			logger.Error("language server shutdown failed", "error", err)
+		}
+	}
+	return service, shutdown, nil
 }
 
 // startValueLogGC periodically reclaims BadgerDB value-log space and returns a
