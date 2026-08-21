@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,8 +9,13 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
+	"time"
 )
+
+// terminationGrace is the window a daemon gets between SIGTERM and SIGKILL.
+const terminationGrace = 2 * time.Second
 
 // Client is a supervised JSON-RPC session with one language server.
 //
@@ -26,7 +32,10 @@ type Client struct {
 	stdin        io.WriteCloser
 
 	mu      sync.Mutex
+	nextID  int64
 	pending map[int64]chan *ResponseMessage
+
+	shutdownOnce sync.Once
 
 	done   chan struct{} // closed when the read loop stops
 	exited chan struct{} // closed after the child has been reaped
@@ -35,7 +44,9 @@ type Client struct {
 	exitErr error
 }
 
-func NewClient(name string, stdin io.WriteCloser, stdout io.Reader, cmd *exec.Cmd, log *slog.Logger) *Client {
+// newClient wires a client onto an arbitrary stream pair. cmd may be nil, which
+// is what the unit tests use to drive an in-process fake server.
+func newClient(name string, stdin io.WriteCloser, stdout io.Reader, cmd *exec.Cmd, log *slog.Logger) *Client {
 	c := &Client{
 		name:        name,
 		log:         log,
@@ -49,6 +60,45 @@ func NewClient(name string, stdin io.WriteCloser, stdout io.Reader, cmd *exec.Cm
 
 	go c.supervise()
 	return c
+}
+
+// Initialize performs the LSP handshake with a cold daemon. It is called once per
+// daemon and must complete before the first request is sent.
+func (c *Client) Initialize(ctx context.Context, cfg *Config, repoDir string) error {
+	params := InitializeParams{
+		ProcessID: int64(os.Getpid()),
+		ClientInfo: ClientInfo{
+			Name:    cfg.ClientName,
+			Version: cfg.ClientVersion,
+		},
+		RootPath: repoDir,
+		RootURI:  PathToURI(repoDir),
+		Capabilities: ClientCapabilities{
+			Workspace: &WorkspaceClientCapabilities{WorkspaceFolders: true, Configuration: true},
+			Window:    &WindowClientCapabilities{WorkDoneProgress: true},
+			TextDocument: &TextDocumentClientCapabilities{
+				Synchronization: map[string]any{"dynamicRegistration": false},
+				References:      map[string]any{"dynamicRegistration": false},
+				Definition:      map[string]any{"dynamicRegistration": false},
+				TypeDefinition:  map[string]any{"dynamicRegistration": false},
+				Implementation:  map[string]any{"dynamicRegistration": false},
+				CallHierarchy:   map[string]any{"dynamicRegistration": false},
+				TypeHierarchy:   map[string]any{"dynamicRegistration": false},
+			},
+		},
+		WorkspaceFolders: []*WorkspaceFolder{{
+			URI:  PathToURI(repoDir),
+			Name: filepath.Base(repoDir),
+		}},
+	}
+
+	if err := c.Call(ctx, MethodInitialize, params, nil); err != nil {
+		return fmt.Errorf("lsp: initialize %s: %w", c.Name(), err)
+	}
+	if err := c.Notify(MethodInitialized, map[string]any{}); err != nil {
+		return fmt.Errorf("lsp: initialized %s: %w", c.Name(), err)
+	}
+	return nil
 }
 
 // Name is the daemon identity used in logs and error messages.
@@ -159,6 +209,7 @@ func (c *Client) answerRequest(msg InboundMessage) {
 	}
 }
 
+// fail tears down every in-flight call once the transport is gone.
 func (c *Client) fail(err error) {
 	c.errMu.Lock()
 	if c.exitErr == nil {
@@ -175,13 +226,156 @@ func (c *Client) fail(err error) {
 
 	close(c.done)
 	for id, ch := range pending {
-		ch <- &ResponseMessage{Error: &ResponseError{Code: CodeRequestFailed, Message: err.Error()}}
+		ch <- &ResponseMessage{Error: &ResponseError{Code: ErrCodeRequestFailed, Message: err.Error()}}
 		c.log.Debug("aborted in-flight lsp request", "server", c.name, "id", id)
 	}
 }
 
+// Err reports why the session ended, or nil while it is healthy.
+func (c *Client) Err() error {
+	c.errMu.Lock()
+	defer c.errMu.Unlock()
+	return c.exitErr
+}
+
+// writeRaw serialises one frame onto the child's stdin.
 func (c *Client) writeRaw(payload []byte) error {
 	c.stdinWriteMu.Lock()
 	defer c.stdinWriteMu.Unlock()
 	return WriteFrame(c.stdin, payload)
+}
+
+// Call sends an LSP request and decodes the response into out, which may be nil when
+// the reply is irrelevant. The context bounds the wait and cancels server-side.
+func (c *Client) Call(ctx context.Context, method string, params any, out any) error {
+	if !c.Alive() {
+		return fmt.Errorf("call %s: %w", method, c.exitReason())
+	}
+
+	id, ch := c.trackCall()
+	payload, err := CreateJsonRpcRequest(&id, method, params)
+	if err != nil {
+		c.forgetCall(id)
+		return fmt.Errorf("lsp: encode %s request: %w", method, err)
+	}
+
+	if err := c.writeRaw(payload); err != nil {
+		c.forgetCall(id)
+		return err
+	}
+
+	select {
+	case <-ctx.Done():
+		c.forgetCall(id)
+		// Best effort: tell the daemon to stop working on a result nobody wants.
+		c.notifyBestEffort(methodCancelRequest, map[string]any{"id": id})
+		return fmt.Errorf("lsp: %s on %s: %w", method, c.name, ctx.Err())
+
+	case <-c.done:
+		c.forgetCall(id)
+		return fmt.Errorf("lsp: %s on %s: %w", method, c.name, c.exitReason())
+
+	case reply := <-ch:
+		if reply.Error != nil {
+			return fmt.Errorf("lsp: %s on %s: %w", method, c.name, reply.Error)
+		}
+		if out == nil || len(reply.Result) == 0 || string(reply.Result) == "null" {
+			return nil
+		}
+		if err := json.Unmarshal(reply.Result, out); err != nil {
+			return fmt.Errorf("lsp: decode %s result: %w", method, err)
+		}
+		return nil
+	}
+}
+
+// Notify sends an LSP notification without waiting for a response (fire-and-forget message).
+func (c *Client) Notify(method string, params any) error {
+	if !c.Alive() {
+		return fmt.Errorf("notify %s: %w", method, c.exitReason())
+	}
+
+	payload, err := CreateJsonRpcRequest(nil, method, params)
+	if err != nil {
+		return fmt.Errorf("lsp: encode %s notification: %w", method, err)
+	}
+	return c.writeRaw(payload)
+}
+
+// notifyBestEffort swallows failures on teardown paths.
+func (c *Client) notifyBestEffort(method string, params any) {
+	if err := c.Notify(method, params); err != nil {
+		c.log.Debug("best-effort notification failed", "server", c.name, "method", method, "error", err)
+	}
+}
+
+// trackCall reserves a slot for a pending request and returns the id and channel to receive the reply.
+func (c *Client) trackCall() (int64, chan *ResponseMessage) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.nextID++
+	id := c.nextID
+	ch := make(chan *ResponseMessage, 1)
+	c.pending[id] = ch
+	return id, ch
+}
+
+// forgetCall removes a pending slot after cancellation or a write failure.
+func (c *Client) forgetCall(id int64) {
+	c.mu.Lock()
+	delete(c.pending, id)
+	c.mu.Unlock()
+}
+
+// exitReason explains a dead session.
+func (c *Client) exitReason() error {
+	if err := c.Err(); err != nil {
+		return err
+	}
+	return ErrDaemonExited
+}
+
+// Shutdown performs the graceful LSP handshake and then guarantees the child
+// process tree is gone: SIGTERM, a two second grace window, then SIGKILL.
+func (c *Client) Shutdown(ctx context.Context) error {
+	var err error
+	c.shutdownOnce.Do(func() { err = c.shutdown(ctx) })
+	return err
+}
+
+func (c *Client) shutdown(ctx context.Context) error {
+	if c.Alive() {
+		// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#shutdown
+		graceful, cancel := context.WithTimeout(ctx, terminationGrace)
+		defer cancel()
+		if callErr := c.Call(graceful, MethodShutdown, nil, nil); callErr != nil {
+			c.log.Debug("graceful lsp shutdown failed", "server", c.name, "error", callErr)
+		}
+		c.notifyBestEffort(MethodExit, nil)
+	}
+	if err := c.stdin.Close(); err != nil {
+		c.log.Debug("closing lsp stdin failed", "server", c.name, "error", err)
+	}
+
+	if c.cmd == nil || c.cmd.Process == nil {
+		<-c.exited
+		return nil
+	}
+
+	if err := terminateTree(c.cmd); err != nil {
+		c.log.Debug("SIGTERM delivery failed", "server", c.name, "error", err)
+	}
+	select {
+	case <-c.exited:
+		return nil
+	case <-time.After(terminationGrace):
+	}
+
+	c.log.Warn("language server ignored SIGTERM, escalating to SIGKILL", "server", c.name)
+	if err := killTree(c.cmd); err != nil {
+		return fmt.Errorf("lsp: kill %s: %w", c.name, err)
+	}
+	<-c.exited
+	return nil
 }

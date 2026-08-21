@@ -17,10 +17,6 @@ const (
 	// MaxMessageBytes rejects absurd Content-Length headers before allocating. A
 	// gopls workspace/symbol response on a large module stays far below this.
 	MaxMessageBytes = 64 << 20 // 64 MiB
-
-	// JSON-RPC 2.0 error codes the orchestrator reacts to.
-	CodeMethodNotFound = -32601
-	CodeRequestFailed  = -32803
 )
 
 // RequestMessage is an outbound call; ID is nil for notifications.
@@ -53,6 +49,12 @@ type ResponseError struct {
 	Data    json.RawMessage `json:"data,omitempty"`
 }
 
+// Error implements the error interface.
+func (e *ResponseError) Error() string {
+	return fmt.Sprintf("lsp: server error %d: %s", e.Code, e.Message)
+}
+
+// InboundMessage is the discriminating shape used to classify any received frame.
 type InboundMessage struct {
 	ID     json.RawMessage `json:"id"`
 	Method string          `json:"method"`
@@ -61,19 +63,14 @@ type InboundMessage struct {
 	Error  *ResponseError  `json:"error"`
 }
 
-// Error implements the error interface.
-func (e *ResponseError) Error() string {
-	return fmt.Sprintf("lsp: server error %d: %s", e.Code, e.Message)
-}
-
 // IsMethodNotFound reports whether err is an unsupported-capability rejection,
 // which callers translate into a graceful degradation rather than a failure.
 func IsMethodNotFound(err error) bool {
 	var re *ResponseError
-	if errors.As(err, &re) {
+	if !errors.As(err, &re) {
 		return false
 	}
-	return re.Code == CodeMethodNotFound
+	return re.Code == ErrCodeMethodNotFound
 }
 
 // writeFrame emits one LSP frame: the Content-Length header, a blank line and
@@ -86,6 +83,22 @@ func WriteFrame(w io.Writer, payload []byte) error {
 		return fmt.Errorf("lsp: write frame body: %w", err)
 	}
 	return nil
+}
+
+func CreateJsonRpcRequest(id *int64, method string, params any) ([]byte, error) {
+	req := RequestMessage{
+		JSONRPC: JsonRpcVer,
+		ID:      id,
+		Method:  method,
+	}
+	if params != nil {
+		var err error
+		req.Params, err = json.Marshal(params)
+		if err != nil {
+			return nil, fmt.Errorf("lsp: encode %s params: %w", method, err)
+		}
+	}
+	return json.Marshal(req)
 }
 
 // frameReader decodes the Content-Length framing from a language server.

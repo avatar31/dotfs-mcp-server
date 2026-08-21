@@ -102,6 +102,15 @@ func Load() (Config, error) {
 	if cfg.GCInterval, err = envDuration("DOTFS_GC_INTERVAL", 10*time.Minute); err != nil {
 		return Config{}, err
 	}
+		if cfg.LSPEnabled, err = envBool("DOTFS_LSP_ENABLED", true); err != nil {
+		return Config{}, err
+	}
+	if cfg.LSPTimeout, err = envDuration("DOTFS_LSP_TIMEOUT", lsp.DefaultRequestTimeout); err != nil {
+		return Config{}, err
+	}
+	if cfg.LSPInitTimeout, err = envDuration("DOTFS_LSP_INIT_TIMEOUT", lsp.DefaultInitTimeout); err != nil {
+		return Config{}, err
+	}
 
 	if cfg.WorkspaceRoot, err = filepath.Abs(cfg.WorkspaceRoot); err != nil {
 		return Config{}, fmt.Errorf("resolve DOTFS_WORKSPACE_ROOT: %w", err)
