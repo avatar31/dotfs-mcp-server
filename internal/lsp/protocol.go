@@ -8,10 +8,20 @@
 package lsp
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"path/filepath"
 	"strings"
+)
+
+const (
+	// JSON-RPC 2.0 version string.
+	JsonRpcVer = "2.0"
+
+	// MaxMessageBytes rejects absurd Content-Length headers before allocating. A
+	// gopls workspace/symbol response on a large module stays far below this.
+	MaxMessageBytes = 64 << 20 // 64 MiB
 )
 
 // Method for LSP messages are defined in the LSP specification at
@@ -124,6 +134,52 @@ func (k SymbolKind) String() string {
 	return "unknown"
 }
 
+// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#abstractMessage
+type baseJsonRpc struct {
+	JSONRPC string `json:"jsonrpc"`
+}
+
+// RequestMessage is an outbound call; ID is nil for notifications.
+// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#requestMessage
+type RequestMessage struct {
+	baseJsonRpc
+	ID     *int64          `json:"id,omitempty"`
+	Method string          `json:"method"`
+	Params json.RawMessage `json:"params,omitempty"`
+}
+
+func newRequestMessage(id *int64, method string, params any) (*RequestMessage, error) {
+	req := RequestMessage{
+		baseJsonRpc: baseJsonRpc{JSONRPC: JsonRpcVer},
+		ID:          id,
+		Method:      method,
+	}
+	if params != nil {
+		var err error
+		req.Params, err = json.Marshal(params)
+		if err != nil {
+			return nil, fmt.Errorf("lsp: encode %s params: %w", method, err)
+		}
+	}
+	return &req, nil
+}
+
+// serverReply answers a server-initiated request.
+type serverReply struct {
+	baseJsonRpc
+	ID     json.RawMessage `json:"id"`
+	Result any             `json:"result"`
+}
+
+// inboundMessage is the discriminating shape used to classify any received frame.
+type inboundMessage struct {
+	ID     json.RawMessage `json:"id"`
+	Method string          `json:"method"`
+	Params json.RawMessage `json:"params"`
+	Result json.RawMessage `json:"result"`
+	Error  *ResponseError  `json:"error"`
+}
+
 // https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#initializeParams
 type InitializeParams struct {
 	ProcessID        int64              `json:"processId"`
@@ -134,26 +190,31 @@ type InitializeParams struct {
 	WorkspaceFolders []*WorkspaceFolder `json:"workspaceFolders"`
 }
 
+// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#clientInfo
 type ClientInfo struct {
 	Name    string `json:"name"`
 	Version string `json:"version,omitempty"`
 }
 
+// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#clientCapabilities
 type ClientCapabilities struct {
 	Workspace    *WorkspaceClientCapabilities    `json:"workspace,omitempty"`
-	Window       *WindowClientCapabilities       `json:"window,omitempty"`
 	TextDocument *TextDocumentClientCapabilities `json:"textDocument,omitempty"`
+	Window       *WindowClientCapabilities       `json:"window,omitempty"`
 }
 
+// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspaceClientCapabilities
 type WorkspaceClientCapabilities struct {
 	WorkspaceFolders bool `json:"workspaceFolders"`
 	Configuration    bool `json:"configuration"`
 }
 
+// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#windowClientCapabilities
 type WindowClientCapabilities struct {
 	WorkDoneProgress bool `json:"workDoneProgress"`
 }
 
+// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocumentClientCapabilities
 type TextDocumentClientCapabilities struct {
 	Synchronization map[string]any `json:"synchronization"`
 	References      map[string]any `json:"references"`
@@ -164,6 +225,7 @@ type TextDocumentClientCapabilities struct {
 	TypeHierarchy   map[string]any `json:"typeHierarchy"`
 }
 
+// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspaceFolder
 type WorkspaceFolder struct {
 	URI  DocumentURI `json:"uri"`
 	Name string      `json:"name"`
@@ -171,18 +233,21 @@ type WorkspaceFolder struct {
 
 // Position is a zero-based line/character coordinate pair, exactly as defined by
 // the protocol. Tool inputs are one-based and converted at the boundary.
+// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#position
 type Position struct {
 	Line      int `json:"line"`
 	Character int `json:"character"`
 }
 
 // Range is a half-open span between two positions.
+// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#range
 type Range struct {
 	Start Position `json:"start"`
 	End   Position `json:"end"`
 }
 
 // Location pins a range inside a document.
+// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#location
 type Location struct {
 	URI   DocumentURI `json:"uri"`
 	Range Range       `json:"range"`
@@ -190,6 +255,7 @@ type Location struct {
 
 // LocationLink is the richer response shape some servers return for
 // implementation and definition requests.
+// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#locationLink
 type LocationLink struct {
 	TargetURI            DocumentURI `json:"targetUri"`
 	TargetRange          Range       `json:"targetRange"`
@@ -197,23 +263,27 @@ type LocationLink struct {
 }
 
 // TextDocumentIdentifier references an open document.
+// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocumentIdentifier
 type TextDocumentIdentifier struct {
 	URI DocumentURI `json:"uri"`
 }
 
 // TextDocumentPositionParams is the base shape of every positional request.
+// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocumentPositionParams
 type TextDocumentPositionParams struct {
 	TextDocument TextDocumentIdentifier `json:"textDocument"`
 	Position     Position               `json:"position"`
 }
 
 // ReferenceParams adds the declaration toggle to a positional request.
+// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#referenceParams
 type ReferenceParams struct {
 	TextDocumentPositionParams
 	Context ReferenceContext `json:"context"`
 }
 
 // ReferenceContext controls whether the declaration itself is returned.
+// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#referenceContext
 type ReferenceContext struct {
 	IncludeDeclaration bool `json:"includeDeclaration"`
 }
@@ -278,9 +348,31 @@ type DidOpenTextDocumentParams struct {
 }
 
 // TextDocumentItem is the payload of textDocument/didOpen.
+// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocumentItem
 type TextDocumentItem struct {
 	URI        DocumentURI `json:"uri"`
 	LanguageID string      `json:"languageId"`
 	Version    int         `json:"version"`
 	Text       string      `json:"text"`
+}
+
+// ResponseMessage is an inbound reply to one of our requests.
+// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#responseMessage
+type ResponseMessage struct {
+	ID     json.RawMessage `json:"id"`
+	Result json.RawMessage `json:"result"`
+	Error  *ResponseError  `json:"error"`
+}
+
+// ResponseError is a JSON-RPC error object returned by the language server.
+// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#responseError
+type ResponseError struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    json.RawMessage `json:"data,omitempty"`
+}
+
+// Error implements the error interface.
+func (e *ResponseError) Error() string {
+	return fmt.Sprintf("lsp: server error %d: %s", e.Code, e.Message)
 }

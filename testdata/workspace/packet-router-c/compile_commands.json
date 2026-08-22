@@ -1,0 +1,13 @@
+[
+  {
+    "directory": "/root/code/dotfs-mcp-server/testdata/workspace/packet-router-c",
+    "file": "/root/code/dotfs-mcp-server/testdata/workspace/packet-router-c/router.c",
+    "arguments": [
+      "cc",
+      "-std=c11",
+      "-I/root/code/dotfs-mcp-server/testdata/workspace/packet-router-c",
+      "-c",
+      "/root/code/dotfs-mcp-server/testdata/workspace/packet-router-c/router.c"
+    ]
+  }
+]

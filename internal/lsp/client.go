@@ -3,7 +3,6 @@ package lsp
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -23,13 +22,10 @@ const terminationGrace = 2 * time.Second
 // pipe pair and correlated by numeric id. Exactly one goroutine owns the read
 // side, so the child process can never be reaped while a frame is in flight.
 type Client struct {
-	name        string
-	frameReader *frameReader
-	cmd         *exec.Cmd
-	log         *slog.Logger
-
-	stdinWriteMu sync.Mutex
-	stdin        io.WriteCloser
+	name  string
+	cmd   *exec.Cmd
+	stdio *stdio
+	log   *slog.Logger
 
 	mu      sync.Mutex
 	nextID  int64
@@ -48,16 +44,16 @@ type Client struct {
 // newClient wires a client onto an arbitrary stream pair. cmd may be nil, which
 // is what the unit tests use to drive an in-process fake server.
 func newClient(name string, stdin io.WriteCloser, stdout io.Reader, cmd *exec.Cmd, log *slog.Logger) *Client {
+	stdio := newStdio(stdin, stdout, log)
 	c := &Client{
-		name:        name,
-		log:         log,
-		stdin:       stdin,
-		frameReader: newFrameReader(stdout),
-		cmd:         cmd,
-		pending:     make(map[int64]chan *ResponseMessage),
-		opened:      make(map[string]struct{}),
-		done:        make(chan struct{}),
-		exited:      make(chan struct{}),
+		name:    name,
+		log:     log,
+		cmd:     cmd,
+		stdio:   stdio,
+		pending: make(map[int64]chan *ResponseMessage),
+		opened:  make(map[string]struct{}),
+		done:    make(chan struct{}),
+		exited:  make(chan struct{}),
 	}
 
 	go c.supervise()
@@ -120,7 +116,7 @@ func (c *Client) Alive() bool {
 // the loop returns satisfies the os/exec contract that Wait must not race with
 // readers of the stdout pipe.
 func (c *Client) supervise() {
-	err := c.readLoop()
+	err := c.stdio.readLoop(c.name, c.dispatch)
 	c.fail(err)
 
 	if c.cmd != nil {
@@ -131,36 +127,8 @@ func (c *Client) supervise() {
 	close(c.exited)
 }
 
-// readLoop decodes frames until the stream ends or breaks.
-func (c *Client) readLoop() error {
-	for {
-		payload, err := c.frameReader.read()
-		if err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, os.ErrClosed) {
-				return fmt.Errorf("lsp: %s closed stdout pipe: %w", c.name, err)
-			}
-			return fmt.Errorf("lsp: %s stream error: %w", c.name, err)
-		}
-
-		var msg InboundMessage
-		if err := json.Unmarshal(payload, &msg); err != nil {
-			c.log.Warn("discarding unparsable lsp frame", "server", c.name, "error", err)
-			continue
-		}
-
-		switch {
-		case msg.Method != "" && len(msg.ID) > 0:
-			c.answerRequest(msg)
-		case msg.Method != "":
-			c.log.Debug("lsp notification", "server", c.name, "method", msg.Method)
-		default:
-			c.dispatch(msg)
-		}
-	}
-}
-
 // dispatch hands a reply to the goroutine blocked in Call.
-func (c *Client) dispatch(msg InboundMessage) {
+func (c *Client) dispatch(msg inboundMessage) {
 	var id int64
 	if err := json.Unmarshal(msg.ID, &id); err != nil {
 		c.log.Warn("response carries a non-numeric id", "server", c.name, "id", string(msg.ID))
@@ -177,40 +145,6 @@ func (c *Client) dispatch(msg InboundMessage) {
 		return
 	}
 	ch <- &ResponseMessage{ID: msg.ID, Result: msg.Result, Error: msg.Error}
-}
-
-// answerServerRequest keeps the daemon unblocked. gopls in particular stalls
-// indefinitely on an unanswered workspace/configuration or registerCapability.
-func (c *Client) answerRequest(msg InboundMessage) {
-	var result any // JSON null unless a specific shape is mandated.
-
-	if msg.Method == methodWorkspaceConfiguration {
-		var params struct {
-			Items []json.RawMessage `json:"items"`
-		}
-		if err := json.Unmarshal(msg.Params, &params); err == nil {
-			settings := make([]map[string]any, len(params.Items))
-			for i := range settings {
-				settings[i] = map[string]any{}
-			}
-			result = settings
-		} else {
-			result = []map[string]any{}
-		}
-	}
-
-	replay, err := json.Marshal(serverReply{
-		JSONRPC: JsonRpcVer,
-		ID:      msg.ID,
-		Result:  result,
-	})
-	if err != nil {
-		c.log.Error("failed to encode reply to server request", "server", c.name, "error", err)
-		return
-	}
-	if err := c.writeRaw(replay); err != nil {
-		c.log.Warn("failed to answer server request", "server", c.name, "method", msg.Method, "error", err)
-	}
 }
 
 // fail tears down every in-flight call once the transport is gone.
@@ -242,13 +176,6 @@ func (c *Client) Err() error {
 	return c.exitErr
 }
 
-// writeRaw serialises one frame onto the child's stdin.
-func (c *Client) writeRaw(payload []byte) error {
-	c.stdinWriteMu.Lock()
-	defer c.stdinWriteMu.Unlock()
-	return WriteFrame(c.stdin, payload)
-}
-
 // Call sends an LSP request and decodes the response into out, which may be nil when
 // the reply is irrelevant. The context bounds the wait and cancels server-side.
 func (c *Client) Call(ctx context.Context, method string, params any, out any) error {
@@ -257,13 +184,13 @@ func (c *Client) Call(ctx context.Context, method string, params any, out any) e
 	}
 
 	id, ch := c.trackCall()
-	payload, err := CreateJsonRpcRequest(&id, method, params)
+	req, err := newRequestMessage(&id, method, params)
 	if err != nil {
 		c.forgetCall(id)
 		return fmt.Errorf("lsp: encode %s request: %w", method, err)
 	}
 
-	if err := c.writeRaw(payload); err != nil {
+	if err := c.stdio.write(req); err != nil {
 		c.forgetCall(id)
 		return err
 	}
@@ -299,11 +226,11 @@ func (c *Client) Notify(method string, params any) error {
 		return fmt.Errorf("notify %s: %w", method, c.exitReason())
 	}
 
-	payload, err := CreateJsonRpcRequest(nil, method, params)
+	req, err := newRequestMessage(nil, method, params)
 	if err != nil {
-		return fmt.Errorf("lsp: encode %s notification: %w", method, err)
+		return fmt.Errorf("lsp: encode %s request: %w", method, err)
 	}
-	return c.writeRaw(payload)
+	return c.stdio.write(req)
 }
 
 // notifyBestEffort swallows failures on teardown paths.
@@ -400,7 +327,7 @@ func (c *Client) shutdown(ctx context.Context) error {
 		cancel()
 		c.notifyBestEffort(MethodExit, nil)
 	}
-	if err := c.stdin.Close(); err != nil {
+	if err := c.stdio.close(); err != nil {
 		c.log.Debug("closing lsp stdin failed", "server", c.name, "error", err)
 	}
 

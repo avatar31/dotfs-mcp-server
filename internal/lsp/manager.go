@@ -307,6 +307,16 @@ func (m *Manager) Close(ctx context.Context) error {
 	return nil
 }
 
+// IsMethodNotFound reports whether err is an unsupported-capability rejection,
+// which callers translate into a graceful degradation rather than a failure.
+func IsMethodNotFound(err error) bool {
+	var re *ResponseError
+	if !errors.As(err, &re) {
+		return false
+	}
+	return re.Code == ErrCodeMethodNotFound
+}
+
 // hasGoModule reports whether gopls has a module to load. A go.mod one level
 // down is accepted because service repositories frequently nest the module.
 func hasGoModule(repoDir string) bool {

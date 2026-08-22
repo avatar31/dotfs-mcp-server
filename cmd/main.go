@@ -184,7 +184,7 @@ func startCrossReference(cfg config.Config, logger *slog.Logger) (mcpserver.Cros
 		ClientVersion:  cfg.ServerVersion,
 	}, logger.With("component", "lsp"))
 
-	service, err := xref.New(xref.FromManager(manager), cfg.WorkspaceRoot, logger.With("component", "xref"))
+	service, err := xref.New(manager, cfg.WorkspaceRoot, logger.With("component", "xref"))
 	if err != nil {
 		return nil, nil, err
 	}
