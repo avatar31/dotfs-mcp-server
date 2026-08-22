@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/avatar31/dotfs-mcp-server/internal/model"
+	"github.com/avatar31/dotfs-mcp-server/internal/utils"
 )
 
 // Default lifecycle timings. RequestTimeout implements the 5 s ceiling from the
@@ -29,8 +30,6 @@ const (
 var (
 	// ErrDisabled is returned when cross-reference support is switched off.
 	ErrDisabled = errors.New("lsp: cross-reference engine is disabled")
-	// ErrUnsupportedLanguage marks a file the daemon pool cannot serve.
-	ErrUnsupportedLanguage = errors.New("lsp: no language server is registered for this file type")
 	// ErrNoCompileCommands means clangd would not be able to resolve headers.
 	ErrNoCompileCommands = errors.New("lsp: no compile_commands.json was found for this repository")
 	// ErrNoGoModule means gopls has no module to load.
@@ -267,7 +266,7 @@ func (m *Manager) commandFor(repoDir string, lang model.Language) (string, []str
 		return m.cfg.ClangdPath, append(args, m.cfg.ClangdArgs...), nil
 
 	default:
-		return "", nil, fmt.Errorf("%w: %q", ErrUnsupportedLanguage, lang)
+		return "", nil, fmt.Errorf("%w: %q", utils.ErrUnsupportedLanguage, lang)
 	}
 }
 

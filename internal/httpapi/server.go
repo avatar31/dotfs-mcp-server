@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/avatar31/dotfs-mcp-server/internal/indexer"
+	"github.com/avatar31/dotfs-mcp-server/internal/utils"
 )
 
 // jobTimeout bounds a single background re-index cycle.
@@ -105,12 +106,12 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	repo := r.PathValue("repo_name")
-	if err := indexer.ValidateRepoName(repo); err != nil {
+	if err := utils.ValidateRepoName(repo); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error(), "repo": repo})
 		return
 	}
 	// Prove the repository exists inside the workspace before claiming a slot.
-	if _, err := indexer.SafeRepoPath(s.cfg.WorkspaceRoot, repo); err != nil {
+	if _, err := utils.SafeRepoPath(s.cfg.WorkspaceRoot, repo); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error(), "repo": repo})
 		return
 	}

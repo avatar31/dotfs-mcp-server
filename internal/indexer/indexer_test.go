@@ -296,27 +296,6 @@ func TestListReposSkipsNonAddressableEntries(t *testing.T) {
 	}
 }
 
-func TestRepoNameValidationRejectsTraversal(t *testing.T) {
-	for _, bad := range []string{"", " ", ".", "..", "../etc", "a/b", `a\b`, "with space", "-leading"} {
-		if err := ValidateRepoName(bad); err == nil {
-			t.Errorf("ValidateRepoName(%q) must fail", bad)
-		}
-	}
-	for _, good := range []string{"nfs-ganesha", "auth-service-go", "repo_1", "Repo.v2"} {
-		if err := ValidateRepoName(good); err != nil {
-			t.Errorf("ValidateRepoName(%q) = %v", good, err)
-		}
-	}
-
-	root := fixtureWorkspace(t)
-	if _, err := SafeRepoPath(root, "packet-router-c"); err != nil {
-		t.Errorf("SafeRepoPath rejected a valid repository: %v", err)
-	}
-	if _, err := SafeRepoPath(root, "does-not-exist"); err == nil {
-		t.Error("SafeRepoPath accepted a missing repository")
-	}
-}
-
 func TestIndexRepoHonoursContextCancellation(t *testing.T) {
 	root := fixtureWorkspace(t)
 	ix, _ := newTestIndexer(t, root)

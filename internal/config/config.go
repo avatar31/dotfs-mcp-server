@@ -102,7 +102,7 @@ func Load() (Config, error) {
 	if cfg.GCInterval, err = envDuration("DOTFS_GC_INTERVAL", 10*time.Minute); err != nil {
 		return Config{}, err
 	}
-		if cfg.LSPEnabled, err = envBool("DOTFS_LSP_ENABLED", true); err != nil {
+	if cfg.LSPEnabled, err = envBool("DOTFS_LSP_ENABLED", true); err != nil {
 		return Config{}, err
 	}
 	if cfg.LSPTimeout, err = envDuration("DOTFS_LSP_TIMEOUT", lsp.DefaultRequestTimeout); err != nil {

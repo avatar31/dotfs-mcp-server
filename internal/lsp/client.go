@@ -34,6 +34,7 @@ type Client struct {
 	mu      sync.Mutex
 	nextID  int64
 	pending map[int64]chan *ResponseMessage
+	opened  map[string]struct{}
 
 	shutdownOnce sync.Once
 
@@ -54,6 +55,7 @@ func newClient(name string, stdin io.WriteCloser, stdout io.Reader, cmd *exec.Cm
 		frameReader: newFrameReader(stdout),
 		cmd:         cmd,
 		pending:     make(map[int64]chan *ResponseMessage),
+		opened:      make(map[string]struct{}),
 		done:        make(chan struct{}),
 		exited:      make(chan struct{}),
 	}
@@ -129,6 +131,7 @@ func (c *Client) supervise() {
 	close(c.exited)
 }
 
+// readLoop decodes frames until the stream ends or breaks.
 func (c *Client) readLoop() error {
 	for {
 		payload, err := c.frameReader.read()
@@ -180,6 +183,7 @@ func (c *Client) dispatch(msg InboundMessage) {
 // indefinitely on an unanswered workspace/configuration or registerCapability.
 func (c *Client) answerRequest(msg InboundMessage) {
 	var result any // JSON null unless a specific shape is mandated.
+
 	if msg.Method == methodWorkspaceConfiguration {
 		var params struct {
 			Items []json.RawMessage `json:"items"`
@@ -336,6 +340,48 @@ func (c *Client) exitReason() error {
 	return ErrDaemonExited
 }
 
+// EnsureOpen publishes a document to the server exactly once per session.
+// clangd will not answer positional requests for a document it has not seen.
+func (c *Client) EnsureOpen(ctx context.Context, path, languageID string) error {
+	c.mu.Lock()
+	_, already := c.opened[path]
+	c.mu.Unlock()
+	if already {
+		return nil
+	}
+
+	text, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("lsp: read %s: %w", path, err)
+	}
+
+	// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_didOpen
+	err = c.Notify(MethodDidOpen, DidOpenTextDocumentParams{
+		TextDocument: TextDocumentItem{
+			URI:        PathToURI(path),
+			LanguageID: languageID,
+			Version:    1,
+			Text:       string(text),
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	c.opened[path] = struct{}{}
+	c.mu.Unlock()
+
+	// Give the server a beat to index the freshly opened document; a positional
+	// request issued in the same instant otherwise races the parse on clangd.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return nil
+	}
+}
+
 // Shutdown performs the graceful LSP handshake and then guarantees the child
 // process tree is gone: SIGTERM, a two second grace window, then SIGKILL.
 func (c *Client) Shutdown(ctx context.Context) error {
@@ -348,10 +394,10 @@ func (c *Client) shutdown(ctx context.Context) error {
 	if c.Alive() {
 		// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#shutdown
 		graceful, cancel := context.WithTimeout(ctx, terminationGrace)
-		defer cancel()
 		if callErr := c.Call(graceful, MethodShutdown, nil, nil); callErr != nil {
 			c.log.Debug("graceful lsp shutdown failed", "server", c.name, "error", callErr)
 		}
+		cancel()
 		c.notifyBestEffort(MethodExit, nil)
 	}
 	if err := c.stdin.Close(); err != nil {

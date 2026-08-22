@@ -1,4 +1,4 @@
-package indexer
+package utils
 
 import (
 	"fmt"
@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/avatar31/dotfs-mcp-server/internal/model"
 )
 
 // repoNamePattern deliberately excludes path separators, whitespace and dots-only
@@ -46,7 +48,7 @@ func SafeRepoPath(root, name string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve repository %q: %w", name, err)
 	}
-	if !isWithin(realRoot, realPath) {
+	if !IsWithinRepo(realRoot, realPath) {
 		return "", fmt.Errorf("repository %q resolves outside the workspace root", name)
 	}
 
@@ -60,11 +62,36 @@ func SafeRepoPath(root, name string) (string, error) {
 	return realPath, nil
 }
 
-// isWithin reports whether child is root itself or nested under it.
-func isWithin(root, child string) bool {
+// IsWithinRepo reports whether child is root itself or nested under it.
+func IsWithinRepo(root, child string) bool {
 	rel, err := filepath.Rel(root, child)
 	if err != nil {
 		return false
 	}
 	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
+}
+
+// LanguageFor maps a file extension onto the language server that owns it.
+func LanguageFor(path string) (model.Language, error) {
+	switch filepath.Ext(path) {
+	case ".go":
+		return model.LanguageGo, nil
+	case ".c", ".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx":
+		return model.LanguageC, nil
+	default:
+		return "", fmt.Errorf("%w: %q", ErrUnsupportedLanguage, filepath.Ext(path))
+	}
+}
+
+// LanguageID renders the LSP languageId for a document.
+func LanguageID(lang model.Language, path string) string {
+	if lang == model.LanguageGo {
+		return "go"
+	}
+	switch filepath.Ext(path) {
+	case ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx":
+		return "cpp"
+	default:
+		return "c"
+	}
 }

@@ -28,6 +28,7 @@ import (
 	"github.com/avatar31/dotfs-mcp-server/internal/model"
 	"github.com/avatar31/dotfs-mcp-server/internal/parser"
 	"github.com/avatar31/dotfs-mcp-server/internal/store"
+	"github.com/avatar31/dotfs-mcp-server/internal/utils"
 )
 
 // MaxSnippetLines caps a single read_code_snippet response.
@@ -106,7 +107,7 @@ func (ix *Indexer) ListRepos() ([]string, error) {
 		if _, skipped := ix.skipDirs[name]; skipped {
 			continue
 		}
-		if ValidateRepoName(name) != nil {
+		if utils.ValidateRepoName(name) != nil {
 			ix.log.Debug("skipping non-addressable workspace entry", "entry", name)
 			continue
 		}
@@ -152,7 +153,7 @@ type parseResult struct {
 func (ix *Indexer) IndexRepo(ctx context.Context, repo string) (Summary, error) {
 	started := time.Now()
 
-	repoPath, err := SafeRepoPath(ix.opts.WorkspaceRoot, repo)
+	repoPath, err := utils.SafeRepoPath(ix.opts.WorkspaceRoot, repo)
 	if err != nil {
 		return Summary{}, err
 	}
@@ -289,7 +290,7 @@ func (ix *Indexer) SearchLive(ctx context.Context, target string, types []model.
 
 	var matches []model.SymbolRecord
 	for _, repo := range repos {
-		repoPath, err := SafeRepoPath(ix.opts.WorkspaceRoot, repo)
+		repoPath, err := utils.SafeRepoPath(ix.opts.WorkspaceRoot, repo)
 		if err != nil {
 			ix.log.Warn("skipping unreadable repository", "repo", repo, "error", err)
 			continue
@@ -349,7 +350,7 @@ func matchesName(sym parser.Symbol, target string) bool {
 // prefixed with line numbers. The range is clamped to MaxSnippetLines and the
 // resolved path is proven to stay inside the repository directory.
 func (ix *Indexer) ReadSnippet(repo, relPath string, startLine, endLine int) (string, error) {
-	repoPath, err := SafeRepoPath(ix.opts.WorkspaceRoot, repo)
+	repoPath, err := utils.SafeRepoPath(ix.opts.WorkspaceRoot, repo)
 	if err != nil {
 		return "", err
 	}
@@ -373,7 +374,7 @@ func (ix *Indexer) ReadSnippet(repo, relPath string, startLine, endLine int) (st
 	if err != nil {
 		return "", fmt.Errorf("resolve %s/%s: %w", repo, relPath, err)
 	}
-	if !isWithin(repoPath, real) {
+	if !utils.IsWithinRepo(repoPath, real) {
 		return "", fmt.Errorf("file_path %q resolves outside repository %q", relPath, repo)
 	}
 

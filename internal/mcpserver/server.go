@@ -16,8 +16,11 @@ import (
 
 	"github.com/avatar31/dotfs-mcp-server/internal/capabilities"
 	"github.com/avatar31/dotfs-mcp-server/internal/indexer"
+	"github.com/avatar31/dotfs-mcp-server/internal/lsp"
 	"github.com/avatar31/dotfs-mcp-server/internal/model"
 	"github.com/avatar31/dotfs-mcp-server/internal/store"
+	"github.com/avatar31/dotfs-mcp-server/internal/utils"
+	"github.com/avatar31/dotfs-mcp-server/internal/xref"
 )
 
 // liveScanTimeout bounds the real-time fallback so a cache miss can never hang
@@ -40,6 +43,14 @@ type LiveScanner interface {
 	ReadSnippet(repo, relPath string, startLine, endLine int) (string, error)
 }
 
+// CrossReference is the relational query surface backed by clangd and gopls.
+type CrossReference interface {
+	FindReferences(ctx context.Context, req xref.ReferenceRequest) (xref.ReferenceResult, error)
+	CallHierarchy(ctx context.Context, req xref.CallHierarchyRequest) (xref.CallHierarchyResult, error)
+	Implementations(ctx context.Context, pos xref.Position) (xref.ImplementationResult, error)
+	TypeHierarchy(ctx context.Context, req xref.TypeHierarchyRequest) (xref.TypeHierarchyResult, error)
+}
+
 // Deps are the collaborators injected into the tool handlers.
 type Deps struct {
 	Cache    Cache
@@ -49,6 +60,7 @@ type Deps struct {
 	Name     string
 	Version  string
 	LiveScan bool
+	XRef     CrossReference
 }
 
 // New builds the MCP server and registers the mandatory toolkit.
@@ -64,12 +76,21 @@ func New(deps Deps) (*mcpsrv.MCPServer, error) {
 		mcpsrv.WithRecovery(),
 	)
 
+	// Tools which will query the cache
 	srv.AddTool(searchTool(), deps.handleGlobalSearch)
 	srv.AddTool(lookupSymbolTool(), deps.handleLookupSymbol)
 	srv.AddTool(typeDefinitionTool(), deps.handleTypeDefinition)
 	srv.AddTool(macroOrConstTool(), deps.handleMacroOrConst)
 	srv.AddTool(readSnippetTool(), deps.handleReadSnippet)
 	srv.AddTool(capabilitiesTool(), deps.handleListCapabilities)
+
+	// Tools which require cross-references and call graphs from LSP
+	if deps.XRef != nil {
+		srv.AddTool(findReferencesTool(), deps.handleFindReferences)
+		srv.AddTool(callHierarchyTool(), deps.handleCallHierarchy)
+		srv.AddTool(implementationsTool(), deps.handleImplementations)
+		srv.AddTool(typeHierarchyTool(), deps.handleTypeHierarchy)
+	}
 	return srv, nil
 }
 
@@ -194,6 +215,84 @@ func capabilitiesTool() mcp.Tool {
 			mcp.Description("Repository directory name, e.g. 'auth-service-go'."),
 		),
 	)
+}
+
+func findReferencesTool() mcp.Tool {
+	opts := append(positionArgs(),
+		mcp.WithBoolean("include_declaration",
+			mcp.Description("Include the declaration itself in the result set. Defaults to false."),
+		),
+	)
+	return readOnlyTool("find_references", "Find all references",
+		"Resolve every call site and usage of the symbol at the given position using the compiler's "+
+			"type graph (clangd for C, gopls for Go), not text search. Use this to answer 'who touches this?'. "+
+			"Returns at most 20 deduplicated hits, each with repo, file_path, line and the source line itself.",
+		opts...,
+	)
+}
+
+func callHierarchyTool() mcp.Tool {
+	opts := append(positionArgs(),
+		mcp.WithString("direction",
+			mcp.Required(),
+			mcp.Enum(xref.DirectionIncoming, xref.DirectionOutgoing),
+			mcp.Description("'incoming' lists the callers of the function; 'outgoing' lists the functions it calls."),
+		),
+	)
+	return readOnlyTool("get_call_hierarchy", "Get call hierarchy",
+		"Compute the caller or callee tree of the function enclosing the given position. "+
+			"'incoming' reports the exact call sites that reach the function - the entry point for root cause "+
+			"analysis; 'outgoing' reports the definitions of everything the function calls.",
+		opts...,
+	)
+}
+
+func implementationsTool() mcp.Tool {
+	return readOnlyTool("find_interface_implementations", "Find implementations",
+		"Map an interface onto the concrete types that satisfy it. Point at a Go interface type name to get "+
+			"every implementing struct, or at a C function-pointer field to get the functions assigned to it. "+
+			"Answers questions static indexing cannot, because Go interface satisfaction is structural.",
+		positionArgs()...,
+	)
+}
+
+func typeHierarchyTool() mcp.Tool {
+	opts := append(positionArgs(),
+		mcp.WithString("direction",
+			mcp.Enum(xref.DirectionSupertypes, xref.DirectionSubtypes, xref.DirectionBoth),
+			mcp.Description("Which side of the hierarchy to walk. Defaults to 'both'."),
+		),
+	)
+	return readOnlyTool("get_type_hierarchy", "Get type hierarchy",
+		"Resolve the declaration site of the type at the given position plus its supertypes and subtypes. "+
+			"For plain C structs only the declaration is returned, which is still the fastest way to jump from "+
+			"a usage to the memory layout behind a typedef or macro-expanded type.",
+		opts...,
+	)
+}
+
+// positionArgs is the coordinate quadruple every relational tool accepts.
+func positionArgs() []mcp.ToolOption {
+	return []mcp.ToolOption{
+		mcp.WithString("repo_name",
+			mcp.Required(),
+			mcp.Description("Repository directory name exactly as returned by any Phase 1/2 lookup."),
+		),
+		mcp.WithString("file_path",
+			mcp.Required(),
+			mcp.Description("Repository-relative path of the file holding the symbol, e.g. 'src/FSAL/fsal_open.c'."),
+		),
+		mcp.WithNumber("line",
+			mcp.Required(),
+			mcp.Min(1),
+			mcp.Description("1-based line number of the symbol, as reported in start_line by lookup_symbol."),
+		),
+		mcp.WithNumber("character",
+			mcp.Required(),
+			mcp.Min(1),
+			mcp.Description("1-based column of the first character of the identifier on that line."),
+		),
+	}
 }
 
 // query is the normalised input shared by the retrieval handlers.
@@ -358,7 +457,7 @@ func (d Deps) handleReadSnippet(_ context.Context, req mcp.CallToolRequest) (*mc
 	if !ok {
 		return mcp.NewToolResultError("repo_name is required and must be a non-empty string"), nil
 	}
-	if err := indexer.ValidateRepoName(repo); err != nil {
+	if err := utils.ValidateRepoName(repo); err != nil {
 		return mcp.NewToolResultErrorFromErr("invalid repo_name", err), nil
 	}
 	path, ok := requiredString(req, "file_path")
@@ -388,7 +487,7 @@ func (d Deps) handleListCapabilities(_ context.Context, req mcp.CallToolRequest)
 	if !ok {
 		return mcp.NewToolResultError("repo_name is required and must be a non-empty string"), nil
 	}
-	if err := indexer.ValidateRepoName(repo); err != nil {
+	if err := utils.ValidateRepoName(repo); err != nil {
 		return mcp.NewToolResultErrorFromErr("invalid repo_name", err), nil
 	}
 
@@ -421,6 +520,122 @@ func (d Deps) handleListCapabilities(_ context.Context, req mcp.CallToolRequest)
 	return mcp.NewToolResultText(d.Matrix.Describe(repo, obs)), nil
 }
 
+// handleFindReferences implements find_references.
+func (d Deps) handleFindReferences(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	pos, errResult := positionFrom(req)
+	if errResult != nil {
+		return errResult, nil
+	}
+
+	result, err := d.XRef.FindReferences(ctx, xref.ReferenceRequest{
+		Position:           pos,
+		IncludeDeclaration: req.GetBool("include_declaration", false),
+	})
+	if err != nil {
+		return d.xrefError("find_references", pos, err), nil
+	}
+	return renderCompactJSON(result)
+}
+
+// handleCallHierarchy implements get_call_hierarchy.
+func (d Deps) handleCallHierarchy(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	pos, errResult := positionFrom(req)
+	if errResult != nil {
+		return errResult, nil
+	}
+	direction, ok := requiredString(req, "direction")
+	if !ok {
+		return mcp.NewToolResultError("direction is required and must be 'incoming' or 'outgoing'"), nil
+	}
+
+	result, err := d.XRef.CallHierarchy(ctx, xref.CallHierarchyRequest{Position: pos, Direction: direction})
+	if err != nil {
+		return d.xrefError("get_call_hierarchy", pos, err), nil
+	}
+	return renderCompactJSON(result)
+}
+
+// handleImplementations implements find_interface_implementations.
+func (d Deps) handleImplementations(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	pos, errResult := positionFrom(req)
+	if errResult != nil {
+		return errResult, nil
+	}
+
+	result, err := d.XRef.Implementations(ctx, pos)
+	if err != nil {
+		return d.xrefError("find_interface_implementations", pos, err), nil
+	}
+	return renderCompactJSON(result)
+}
+
+// handleTypeHierarchy implements get_type_hierarchy.
+func (d Deps) handleTypeHierarchy(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	pos, errResult := positionFrom(req)
+	if errResult != nil {
+		return errResult, nil
+	}
+
+	result, err := d.XRef.TypeHierarchy(ctx, xref.TypeHierarchyRequest{
+		Position:  pos,
+		Direction: req.GetString("direction", xref.DirectionBoth),
+	})
+	if err != nil {
+		return d.xrefError("get_type_hierarchy", pos, err), nil
+	}
+	return renderCompactJSON(result)
+}
+
+// xrefError converts an engine failure into actionable guidance. Every branch
+// tells the agent how to keep making progress with the Phase 1/2 tools.
+func (d Deps) xrefError(tool string, pos xref.Position, err error) *mcp.CallToolResult {
+	d.Log.Warn("cross-reference query failed",
+		"tool", tool, "repo", pos.Repo, "file", pos.FilePath, "line", pos.Line, "error", err)
+
+	switch {
+	case errors.Is(err, xref.ErrTimeout), errors.Is(err, context.DeadlineExceeded):
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"Tool execution timeout: the language server did not answer %s in time. "+
+				"The daemon is probably still indexing %s - retry shortly, or use lookup_symbol "+
+				"for the static declaration in the meantime.", tool, pos.Repo))
+
+	case errors.Is(err, lsp.ErrNoCompileCommands):
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"Repository %q has no compile_commands.json, so clangd cannot resolve its headers. "+
+				"Generate one with 'cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON' (or 'bear -- make') and place it "+
+				"in the repository root or its build/ directory. Until then use lookup_symbol and "+
+				"global_codebase_search, which do not need a compilation database.", pos.Repo))
+
+	case errors.Is(err, lsp.ErrNoGoModule):
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"Repository %q contains no go.mod, so gopls has no module to load. "+
+				"Fall back to lookup_symbol for the static declaration.", pos.Repo))
+
+	case errors.Is(err, lsp.ErrServerUnavailable):
+		return mcp.NewToolResultErrorFromErr(
+			"The required language server is not installed on this host (install gopls or clangd, or set "+
+				"DOTFS_GOPLS_PATH / DOTFS_CLANGD_PATH). Cross-reference tools are unavailable; "+
+				"lookup_symbol and global_codebase_search still work", err)
+
+	case errors.Is(err, utils.ErrUnsupportedLanguage):
+		return mcp.NewToolResultErrorFromErr(
+			"No language server handles this file type. Only .go, .c/.h and C++ sources are supported; "+
+				"use lookup_symbol for anything else that was statically indexed", err)
+
+	case errors.Is(err, lsp.ErrDaemonExited):
+		return mcp.NewToolResultErrorFromErr(
+			"The language server crashed while answering. A fresh daemon will be started on the next call, "+
+				"so retrying once is usually enough", err)
+
+	case errors.Is(err, lsp.ErrDisabled), errors.Is(err, lsp.ErrClosed):
+		return mcp.NewToolResultErrorFromErr(
+			"The cross-reference engine is not running. Use lookup_symbol and global_codebase_search instead", err)
+
+	default:
+		return mcp.NewToolResultErrorFromErr(fmt.Sprintf("%s failed", tool), err)
+	}
+}
+
 // requiredString reads and trims a mandatory string argument.
 func requiredString(req mcp.CallToolRequest, key string) (string, bool) {
 	raw, err := req.RequireString(key)
@@ -437,7 +652,7 @@ func optionalRepo(req mcp.CallToolRequest) (string, *mcp.CallToolResult) {
 	if repo == "" {
 		return "", nil
 	}
-	if err := indexer.ValidateRepoName(repo); err != nil {
+	if err := utils.ValidateRepoName(repo); err != nil {
 		return "", mcp.NewToolResultErrorFromErr("invalid repo_name", err)
 	}
 	return repo, nil
@@ -458,4 +673,38 @@ func notFoundMessage(kind, target string) string {
 			"Verify the exact identifier spelling, or re-index the owning repository via "+
 			"POST /api/v1/<repo_name>/update before retrying.", kind, target,
 	)
+}
+
+// positionFrom validates the shared coordinate arguments.
+func positionFrom(req mcp.CallToolRequest) (xref.Position, *mcp.CallToolResult) {
+	repo, ok := requiredString(req, "repo_name")
+	if !ok {
+		return xref.Position{}, mcp.NewToolResultError("repo_name is required and must be a non-empty string")
+	}
+	if err := utils.ValidateRepoName(repo); err != nil {
+		return xref.Position{}, mcp.NewToolResultErrorFromErr("invalid repo_name", err)
+	}
+	path, ok := requiredString(req, "file_path")
+	if !ok {
+		return xref.Position{}, mcp.NewToolResultError("file_path is required and must be a non-empty string")
+	}
+	line, err := req.RequireInt("line")
+	if err != nil {
+		return xref.Position{}, mcp.NewToolResultError("line is required and must be a 1-based integer")
+	}
+	character, err := req.RequireInt("character")
+	if err != nil {
+		return xref.Position{}, mcp.NewToolResultError("character is required and must be a 1-based integer")
+	}
+	return xref.Position{Repo: repo, FilePath: path, Line: line, Character: character}, nil
+}
+
+// renderCompactJSON emits minified JSON, as mandated by the token guardrails:
+// relational answers are consumed by the model, not read by a human.
+func renderCompactJSON(payload any) (*mcp.CallToolResult, error) {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return mcp.NewToolResultErrorFromErr("failed to serialise the cross-reference result", err), nil
+	}
+	return mcp.NewToolResultText(string(encoded)), nil
 }

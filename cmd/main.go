@@ -111,9 +111,9 @@ func run() error {
 		go func() { apiErrCh <- api.ListenAndServe() }()
 	}
 
-	// Phase 3: the language-server pool is created eagerly but spawns nothing
+	// The language-server pool is created eagerly but spawns nothing
 	// until a relational tool is actually called.
-	_, closeLSP, err := startCrossReference(cfg, logger)
+	crossRef, closeLSP, err := startCrossReference(cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -127,6 +127,7 @@ func run() error {
 		Name:     cfg.ServerName,
 		Version:  cfg.ServerVersion,
 		LiveScan: true,
+		XRef:     crossRef,
 	})
 	if err != nil {
 		return err
@@ -166,9 +167,6 @@ func run() error {
 	return runErr
 }
 
-// startCrossReference builds the Phase 3 engine and returns it together with a
-// teardown func. A nil service is returned - and the relational tools are then
-// never registered - whenever the engine is switched off.
 func startCrossReference(cfg config.Config, logger *slog.Logger) (mcpserver.CrossReference, func(), error) {
 	if !cfg.LSPEnabled {
 		logger.Info("cross-reference engine disabled", "reason", "DOTFS_LSP_ENABLED=false")

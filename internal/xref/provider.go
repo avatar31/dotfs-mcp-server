@@ -10,7 +10,10 @@ import (
 
 // Session is the slice of an LSP client the service depends on. Keeping it an
 // interface makes the whole compaction pipeline testable without a daemon.
-type Session interface {}
+type Session interface {
+	EnsureOpen(ctx context.Context, path, languageID string) error
+	Call(ctx context.Context, method string, params, out any) error
+}
 
 // Provider hands out initialised sessions, one per repository and language.
 type Provider interface {
