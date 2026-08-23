@@ -6,7 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/avatar31/dotfs-mcp-server/internal/model"
+	"github.com/avatar31/dotfs-mcp-server/internal/ast"
+	"github.com/avatar31/dotfs-mcp-server/internal/utils"
 )
 
 func testStore(t *testing.T) *Store {
@@ -25,11 +26,11 @@ func testStore(t *testing.T) *Store {
 	return st
 }
 
-func record(repo, file, name string, kind model.SymbolType) model.SymbolRecord {
-	return model.SymbolRecord{
+func record(repo, file, name string, kind ast.SymbolType) ast.SymbolRecord {
+	return ast.SymbolRecord{
 		RepoName:      repo,
 		FilePath:      file,
-		Language:      model.LanguageC,
+		Language:      utils.LanguageC,
 		SymbolType:    kind,
 		Name:          name,
 		StartByte:     12,
@@ -42,7 +43,7 @@ func record(repo, file, name string, kind model.SymbolType) model.SymbolRecord {
 	}
 }
 
-func put(t *testing.T, st *Store, rec model.SymbolRecord) string {
+func put(t *testing.T, st *Store, rec ast.SymbolRecord) string {
 	t.Helper()
 	key, _, err := st.PutSymbol(rec)
 	if err != nil {
@@ -52,7 +53,7 @@ func put(t *testing.T, st *Store, rec model.SymbolRecord) string {
 }
 
 func TestPrimaryKeyLayout(t *testing.T) {
-	rec := record("nfs-ganesha", "src/include/fsal_types.h", "fsal_obj_handle", model.SymbolStruct)
+	rec := record("nfs-ganesha", "src/include/fsal_types.h", "fsal_obj_handle", ast.SymbolStruct)
 	rec.StartByte = 1420
 
 	got := PrimaryKey(rec)
@@ -77,7 +78,7 @@ func TestPrimaryKeyLayout(t *testing.T) {
 
 func TestPutAndLookupExact(t *testing.T) {
 	st := testStore(t)
-	put(t, st, record("repo-a", "src/a.c", "read_header", model.SymbolFunction))
+	put(t, st, record("repo-a", "src/a.c", "read_header", ast.SymbolFunction))
 
 	got, err := st.Lookup("read_header", Filter{ExactOnly: true})
 	if err != nil {
@@ -104,7 +105,7 @@ func TestPutAndLookupExact(t *testing.T) {
 
 func TestPutSkipsUnchangedRecords(t *testing.T) {
 	st := testStore(t)
-	rec := record("repo-a", "src/a.c", "read_header", model.SymbolFunction)
+	rec := record("repo-a", "src/a.c", "read_header", ast.SymbolFunction)
 
 	if _, written, err := st.PutSymbol(rec); err != nil || !written {
 		t.Fatalf("first put: written=%v err=%v", written, err)
@@ -122,11 +123,11 @@ func TestPutSkipsUnchangedRecords(t *testing.T) {
 func TestPutRejectsInvalidRecords(t *testing.T) {
 	st := testStore(t)
 
-	broken := record("repo-a", "src/a.c", "", model.SymbolFunction)
+	broken := record("repo-a", "src/a.c", "", ast.SymbolFunction)
 	if _, _, err := st.PutSymbol(broken); err == nil {
 		t.Error("a record without a name must be rejected")
 	}
-	broken = record("repo-a", "src/a.c", "x", model.SymbolType("gadget"))
+	broken = record("repo-a", "src/a.c", "x", ast.SymbolType("gadget"))
 	if _, _, err := st.PutSymbol(broken); err == nil {
 		t.Error("a record with an unknown symbol_type must be rejected")
 	}
@@ -134,10 +135,10 @@ func TestPutRejectsInvalidRecords(t *testing.T) {
 
 func TestLookupPrefixTypeAndRepoFilters(t *testing.T) {
 	st := testStore(t)
-	put(t, st, record("repo-a", "src/a.h", "ERR_FSAL_NO_QUOTA", model.SymbolMacro))
-	put(t, st, record("repo-a", "src/a.h", "ERR_FSAL_STALE", model.SymbolMacro))
-	put(t, st, record("repo-b", "src/b.h", "ERR_FSAL_PERM", model.SymbolMacro))
-	put(t, st, record("repo-a", "src/a.h", "ERR_FSAL_HANDLE", model.SymbolStruct))
+	put(t, st, record("repo-a", "src/a.h", "ERR_FSAL_NO_QUOTA", ast.SymbolMacro))
+	put(t, st, record("repo-a", "src/a.h", "ERR_FSAL_STALE", ast.SymbolMacro))
+	put(t, st, record("repo-b", "src/b.h", "ERR_FSAL_PERM", ast.SymbolMacro))
+	put(t, st, record("repo-a", "src/a.h", "ERR_FSAL_HANDLE", ast.SymbolStruct))
 
 	all, err := st.Lookup("ERR_FSAL", Filter{})
 	if err != nil {
@@ -147,7 +148,7 @@ func TestLookupPrefixTypeAndRepoFilters(t *testing.T) {
 		t.Fatalf("prefix lookup returned %d records, want 4", len(all))
 	}
 
-	macros, err := st.Lookup("ERR_FSAL", Filter{Types: []model.SymbolType{model.SymbolMacro}})
+	macros, err := st.Lookup("ERR_FSAL", Filter{Types: []ast.SymbolType{ast.SymbolMacro}})
 	if err != nil {
 		t.Fatalf("typed lookup: %v", err)
 	}
@@ -155,7 +156,7 @@ func TestLookupPrefixTypeAndRepoFilters(t *testing.T) {
 		t.Fatalf("typed lookup returned %d records, want 3", len(macros))
 	}
 	for _, m := range macros {
-		if m.SymbolType != model.SymbolMacro {
+		if m.SymbolType != ast.SymbolMacro {
 			t.Errorf("type filter leaked %q", m.SymbolType)
 		}
 	}
@@ -184,11 +185,11 @@ func TestLookupPrefixTypeAndRepoFilters(t *testing.T) {
 func TestLookupResolvesAliasesAndRanksExactFirst(t *testing.T) {
 	st := testStore(t)
 
-	method := record("repo-a", "srv.go", "Issue", model.SymbolMethod)
-	method.Language = model.LanguageGo
+	method := record("repo-a", "srv.go", "Issue", ast.SymbolMethod)
+	method.Language = utils.LanguageGo
 	method.Aliases = []string{"Issuer.Issue"}
 	put(t, st, method)
-	put(t, st, record("repo-a", "srv.go", "IssueLater", model.SymbolFunction))
+	put(t, st, record("repo-a", "srv.go", "IssueLater", ast.SymbolFunction))
 
 	byAlias, err := st.Lookup("Issuer.Issue", Filter{ExactOnly: true})
 	if err != nil {
@@ -210,11 +211,11 @@ func TestLookupResolvesAliasesAndRanksExactFirst(t *testing.T) {
 func TestPruneRepoInvalidatesStaleRecordsAndIndexes(t *testing.T) {
 	st := testStore(t)
 
-	keepRec := record("repo-a", "src/a.c", "still_here", model.SymbolFunction)
-	staleRec := record("repo-a", "src/a.c", "removed", model.SymbolFunction)
+	keepRec := record("repo-a", "src/a.c", "still_here", ast.SymbolFunction)
+	staleRec := record("repo-a", "src/a.c", "removed", ast.SymbolFunction)
 	staleRec.StartByte, staleRec.EndByte = 900, 940
 	staleRec.Aliases = []string{"legacy_removed"}
-	otherRepo := record("repo-b", "src/b.c", "untouched", model.SymbolFunction)
+	otherRepo := record("repo-b", "src/b.c", "untouched", ast.SymbolFunction)
 
 	keepKey := put(t, st, keepRec)
 	put(t, st, staleRec)
@@ -253,13 +254,13 @@ func TestPruneRepoInvalidatesStaleRecordsAndIndexes(t *testing.T) {
 func TestFileSymbolsAreOrderedBySourcePosition(t *testing.T) {
 	st := testStore(t)
 
-	second := record("repo-a", "src/a.c", "second", model.SymbolFunction)
+	second := record("repo-a", "src/a.c", "second", ast.SymbolFunction)
 	second.StartByte, second.EndByte = 4000, 4040
-	first := record("repo-a", "src/a.c", "first", model.SymbolFunction)
+	first := record("repo-a", "src/a.c", "first", ast.SymbolFunction)
 	first.StartByte, first.EndByte = 10, 50
 	put(t, st, second)
 	put(t, st, first)
-	put(t, st, record("repo-a", "src/other.c", "elsewhere", model.SymbolFunction))
+	put(t, st, record("repo-a", "src/other.c", "elsewhere", ast.SymbolFunction))
 
 	got, err := st.FileSymbols("repo-a", "src/a.c")
 	if err != nil {
@@ -273,11 +274,11 @@ func TestFileSymbolsAreOrderedBySourcePosition(t *testing.T) {
 func TestStatsAggregatesPerRepository(t *testing.T) {
 	st := testStore(t)
 
-	goFn := record("repo-a", "srv.go", "Serve", model.SymbolFunction)
-	goFn.Language = model.LanguageGo
+	goFn := record("repo-a", "srv.go", "Serve", ast.SymbolFunction)
+	goFn.Language = utils.LanguageGo
 	put(t, st, goFn)
-	put(t, st, record("repo-a", "src/a.h", "ROUTER_MAX", model.SymbolMacro))
-	put(t, st, record("repo-b", "src/b.c", "handle", model.SymbolFunction))
+	put(t, st, record("repo-a", "src/a.h", "ROUTER_MAX", ast.SymbolMacro))
+	put(t, st, record("repo-b", "src/b.c", "handle", ast.SymbolFunction))
 
 	stats, err := st.Stats()
 	if err != nil {

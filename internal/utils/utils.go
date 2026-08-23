@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-
-	"github.com/avatar31/dotfs-mcp-server/internal/model"
 )
 
 // repoNamePattern deliberately excludes path separators, whitespace and dots-only
@@ -72,20 +70,20 @@ func IsWithinRepo(root, child string) bool {
 }
 
 // LanguageFor maps a file extension onto the language server that owns it.
-func LanguageFor(path string) (model.Language, error) {
+func LanguageFor(path string) (Language, error) {
 	switch filepath.Ext(path) {
 	case ".go":
-		return model.LanguageGo, nil
+		return LanguageGo, nil
 	case ".c", ".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx":
-		return model.LanguageC, nil
+		return LanguageC, nil
 	default:
 		return "", fmt.Errorf("%w: %q", ErrUnsupportedLanguage, filepath.Ext(path))
 	}
 }
 
 // LanguageID renders the LSP languageId for a document.
-func LanguageID(lang model.Language, path string) string {
-	if lang == model.LanguageGo {
+func LanguageID(lang Language, path string) string {
+	if lang == LanguageGo {
 		return "go"
 	}
 	switch filepath.Ext(path) {

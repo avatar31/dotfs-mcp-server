@@ -6,7 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/avatar31/dotfs-mcp-server/internal/model"
+	"github.com/avatar31/dotfs-mcp-server/internal/ast"
+	"github.com/avatar31/dotfs-mcp-server/internal/utils"
 )
 
 func parseFixture(t *testing.T, engine Engine, path string) map[string]Symbol {
@@ -53,8 +54,8 @@ func TestGoEngineExtractsFunctionsAndMethods(t *testing.T) {
 	symbols := parseFixture(t, NewGoEngine(), "../../testdata/workspace/auth-service-go/token.go")
 
 	fn := want(t, symbols, "ValidateSessionToken")
-	if fn.Type != model.SymbolFunction {
-		t.Errorf("symbol_type = %q, want %q", fn.Type, model.SymbolFunction)
+	if fn.Type != ast.SymbolFunction {
+		t.Errorf("symbol_type = %q, want %q", fn.Type, ast.SymbolFunction)
 	}
 	if !strings.HasPrefix(fn.SourceCode, "func ValidateSessionToken(") {
 		t.Errorf("source does not start at the func keyword: %q", fn.SourceCode)
@@ -67,8 +68,8 @@ func TestGoEngineExtractsFunctionsAndMethods(t *testing.T) {
 	}
 
 	method := want(t, symbols, "Issue")
-	if method.Type != model.SymbolMethod {
-		t.Errorf("symbol_type = %q, want %q", method.Type, model.SymbolMethod)
+	if method.Type != ast.SymbolMethod {
+		t.Errorf("symbol_type = %q, want %q", method.Type, ast.SymbolMethod)
 	}
 	if method.ParentScope != "Issuer" {
 		t.Errorf("parent_scope = %q, want %q", method.ParentScope, "Issuer")
@@ -85,8 +86,8 @@ func TestGoEngineExtractsTypesInterfacesAndConstants(t *testing.T) {
 	symbols := parseFixture(t, NewGoEngine(), "../../testdata/workspace/auth-service-go/types.go")
 
 	st := want(t, symbols, "Session")
-	if st.Type != model.SymbolStruct {
-		t.Errorf("Session symbol_type = %q, want %q", st.Type, model.SymbolStruct)
+	if st.Type != ast.SymbolStruct {
+		t.Errorf("Session symbol_type = %q, want %q", st.Type, ast.SymbolStruct)
 	}
 	if !strings.HasPrefix(st.SourceCode, "type Session struct {") {
 		t.Errorf("struct source is not self-contained: %q", st.SourceCode)
@@ -99,8 +100,8 @@ func TestGoEngineExtractsTypesInterfacesAndConstants(t *testing.T) {
 	}
 
 	iface := want(t, symbols, "SessionStore")
-	if iface.Type != model.SymbolInterface {
-		t.Errorf("SessionStore symbol_type = %q, want %q", iface.Type, model.SymbolInterface)
+	if iface.Type != ast.SymbolInterface {
+		t.Errorf("SessionStore symbol_type = %q, want %q", iface.Type, ast.SymbolInterface)
 	}
 	if !strings.Contains(iface.Documentation, "Save(s Session) error") {
 		t.Errorf("interface method signatures were not extracted: %q", iface.Documentation)
@@ -110,21 +111,21 @@ func TestGoEngineExtractsTypesInterfacesAndConstants(t *testing.T) {
 	}
 
 	alias := want(t, symbols, "AccountID")
-	if alias.Type != model.SymbolTypeAlias {
-		t.Errorf("AccountID symbol_type = %q, want %q", alias.Type, model.SymbolTypeAlias)
+	if alias.Type != ast.SymbolTypeAlias {
+		t.Errorf("AccountID symbol_type = %q, want %q", alias.Type, ast.SymbolTypeAlias)
 	}
 
 	named := want(t, symbols, "SessionState")
-	if named.Type != model.SymbolTypedef {
-		t.Errorf("SessionState symbol_type = %q, want %q", named.Type, model.SymbolTypedef)
+	if named.Type != ast.SymbolTypedef {
+		t.Errorf("SessionState symbol_type = %q, want %q", named.Type, ast.SymbolTypedef)
 	}
 
 	// Every member of a grouped iota block must carry the whole block so the
 	// model can reason about neighbouring values.
 	for _, name := range []string{"StatusPending", "StatusActive", "StatusRevoked"} {
 		c := want(t, symbols, name)
-		if c.Type != model.SymbolConstant {
-			t.Errorf("%s symbol_type = %q, want %q", name, c.Type, model.SymbolConstant)
+		if c.Type != ast.SymbolConstant {
+			t.Errorf("%s symbol_type = %q, want %q", name, c.Type, ast.SymbolConstant)
 		}
 		if !strings.Contains(c.SourceCode, "StatusRevoked") || !strings.Contains(c.SourceCode, "iota") {
 			t.Errorf("%s does not carry the const block: %q", name, c.SourceCode)
@@ -148,8 +149,8 @@ func TestCEngineExtractsMacrosRecordsEnumsAndTypedefs(t *testing.T) {
 	symbols := parseFixture(t, NewCEngine(), "../../testdata/workspace/packet-router-c/router.h")
 
 	macro := want(t, symbols, "ROUTER_QUEUE_DEPTH")
-	if macro.Type != model.SymbolMacro {
-		t.Errorf("symbol_type = %q, want %q", macro.Type, model.SymbolMacro)
+	if macro.Type != ast.SymbolMacro {
+		t.Errorf("symbol_type = %q, want %q", macro.Type, ast.SymbolMacro)
 	}
 	if macro.Signature != "#define ROUTER_QUEUE_DEPTH 1024" {
 		t.Errorf("macro signature = %q", macro.Signature)
@@ -159,16 +160,16 @@ func TestCEngineExtractsMacrosRecordsEnumsAndTypedefs(t *testing.T) {
 	}
 
 	fnMacro := want(t, symbols, "ROUTER_MIN")
-	if fnMacro.Type != model.SymbolMacroFunction {
-		t.Errorf("symbol_type = %q, want %q", fnMacro.Type, model.SymbolMacroFunction)
+	if fnMacro.Type != ast.SymbolMacroFunction {
+		t.Errorf("symbol_type = %q, want %q", fnMacro.Type, ast.SymbolMacroFunction)
 	}
 	if fnMacro.Signature != "#define ROUTER_MIN(a, b)" {
 		t.Errorf("macro function signature = %q", fnMacro.Signature)
 	}
 
 	vtable := want(t, symbols, "router_ops")
-	if vtable.Type != model.SymbolStruct {
-		t.Errorf("symbol_type = %q, want %q", vtable.Type, model.SymbolStruct)
+	if vtable.Type != ast.SymbolStruct {
+		t.Errorf("symbol_type = %q, want %q", vtable.Type, ast.SymbolStruct)
 	}
 	if !strings.Contains(vtable.Documentation, "Fields: open, write, close") {
 		t.Errorf("function table members were not extracted: %q", vtable.Documentation)
@@ -180,17 +181,17 @@ func TestCEngineExtractsMacrosRecordsEnumsAndTypedefs(t *testing.T) {
 	}
 
 	enum := want(t, symbols, "router_priority")
-	if enum.Type != model.SymbolEnum {
-		t.Errorf("symbol_type = %q, want %q", enum.Type, model.SymbolEnum)
+	if enum.Type != ast.SymbolEnum {
+		t.Errorf("symbol_type = %q, want %q", enum.Type, ast.SymbolEnum)
 	}
 	low := want(t, symbols, "ROUTER_PRIORITY_LOW")
-	if low.Type != model.SymbolConstant || low.ParentScope != "router_priority" {
+	if low.Type != ast.SymbolConstant || low.ParentScope != "router_priority" {
 		t.Errorf("enumerator = %q/%q", low.Type, low.ParentScope)
 	}
 
 	td := want(t, symbols, "router_status_t")
-	if td.Type != model.SymbolTypedef {
-		t.Errorf("symbol_type = %q, want %q", td.Type, model.SymbolTypedef)
+	if td.Type != ast.SymbolTypedef {
+		t.Errorf("symbol_type = %q, want %q", td.Type, ast.SymbolTypedef)
 	}
 	// Enumerators of an anonymous enum inherit the typedef name as their scope.
 	quota := want(t, symbols, "ROUTER_ERR_NO_QUOTA")
@@ -202,7 +203,7 @@ func TestCEngineExtractsMacrosRecordsEnumsAndTypedefs(t *testing.T) {
 	}
 
 	proto := want(t, symbols, "route_packet")
-	if proto.Type != model.SymbolFunction {
+	if proto.Type != ast.SymbolFunction {
 		t.Errorf("prototype symbol_type = %q", proto.Type)
 	}
 	if strings.HasSuffix(proto.Signature, ";") {
@@ -238,12 +239,12 @@ func TestCEngineIgnoresNonDefinitions(t *testing.T) {
 func TestRegistryRoutesByExtension(t *testing.T) {
 	r := NewDefaultRegistry()
 
-	for path, lang := range map[string]model.Language{
-		"/w/repo/main.go":     model.LanguageGo,
-		"/w/repo/router.c":    model.LanguageC,
-		"/w/repo/router.h":    model.LanguageC,
-		"/w/repo/Router.H":    model.LanguageC,
-		"/w/repo/nested/x.go": model.LanguageGo,
+	for path, lang := range map[string]utils.Language{
+		"/w/repo/main.go":     utils.LanguageGo,
+		"/w/repo/router.c":    utils.LanguageC,
+		"/w/repo/router.h":    utils.LanguageC,
+		"/w/repo/Router.H":    utils.LanguageC,
+		"/w/repo/nested/x.go": utils.LanguageGo,
 	} {
 		engine, ok := r.For(path)
 		if !ok {

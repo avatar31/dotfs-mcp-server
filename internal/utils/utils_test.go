@@ -5,8 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/avatar31/dotfs-mcp-server/internal/model"
 )
 
 // fixtureWorkspace copies the checked-in sample workspace into a temp dir so
@@ -65,12 +63,12 @@ func TestSafeRepoPath(t *testing.T) {
 }
 
 func TestLanguageFor(t *testing.T) {
-	cases := map[string]model.Language{
-		"token.go":   model.LanguageGo,
-		"router.c":   model.LanguageC,
-		"router.h":   model.LanguageC,
-		"engine.cpp": model.LanguageC,
-		"engine.hpp": model.LanguageC,
+	cases := map[string]Language{
+		"token.go":   LanguageGo,
+		"router.c":   LanguageC,
+		"router.h":   LanguageC,
+		"engine.cpp": LanguageC,
+		"engine.hpp": LanguageC,
 	}
 	for path, want := range cases {
 		got, err := LanguageFor(path)
@@ -84,13 +82,13 @@ func TestLanguageFor(t *testing.T) {
 }
 
 func TestLanguageID(t *testing.T) {
-	if got := LanguageID(model.LanguageGo, "token.go"); got != "go" {
+	if got := LanguageID(LanguageGo, "token.go"); got != "go" {
 		t.Errorf("go languageId = %q", got)
 	}
-	if got := LanguageID(model.LanguageC, "router.c"); got != "c" {
+	if got := LanguageID(LanguageC, "router.c"); got != "c" {
 		t.Errorf("c languageId = %q", got)
 	}
-	if got := LanguageID(model.LanguageC, "engine.cpp"); got != "cpp" {
+	if got := LanguageID(LanguageC, "engine.cpp"); got != "cpp" {
 		t.Errorf("cpp languageId = %q", got)
 	}
 }

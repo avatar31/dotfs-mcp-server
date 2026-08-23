@@ -1,6 +1,5 @@
-// Package model defines the wire and storage schema shared by the parser,
-// cache and MCP tool layers.
-package model
+// Package ast defines AST extraction pipeline. It is used by the MCP.
+package ast
 
 import (
 	"crypto/sha256"
@@ -8,22 +7,9 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/avatar31/dotfs-mcp-server/internal/utils"
 )
-
-// Language classifies the runtime environment a symbol belongs to. The MCP
-// client uses it to pick syntax-specific markdown fences and linting rules.
-type Language string
-
-// Supported language classifications.
-const (
-	LanguageC  Language = "c"
-	LanguageGo Language = "go"
-)
-
-// Valid reports whether the language tag is one of the supported values.
-func (l Language) Valid() bool {
-	return l == LanguageC || l == LanguageGo
-}
 
 // SymbolType is the closed enumeration of indexable declaration kinds.
 type SymbolType string
@@ -99,20 +85,20 @@ func ParseSymbolType(raw string) (SymbolType, error) {
 // "sym:<repo>:<file_path>:<symbol_type>:<name>:<offset>" key. The field set and
 // JSON names are contractual: the LLM client consumes this document verbatim.
 type SymbolRecord struct {
-	RepoName      string     `json:"repo_name"`
-	FilePath      string     `json:"file_path"`
-	Language      Language   `json:"language"`
-	SymbolType    SymbolType `json:"symbol_type"`
-	Name          string     `json:"name"`
-	Aliases       []string   `json:"aliases,omitempty"`
-	ParentScope   string     `json:"parent_scope"`
-	StartByte     int        `json:"start_byte"`
-	EndByte       int        `json:"end_byte"`
-	StartLine     int        `json:"start_line"`
-	EndLine       int        `json:"end_line"`
-	Documentation string     `json:"documentation"`
-	Signature     string     `json:"signature"`
-	SourceCode    string     `json:"source_code"`
+	RepoName      string         `json:"repo_name"`
+	FilePath      string         `json:"file_path"`
+	Language      utils.Language `json:"language"`
+	SymbolType    SymbolType     `json:"symbol_type"`
+	Name          string         `json:"name"`
+	Aliases       []string       `json:"aliases,omitempty"`
+	ParentScope   string         `json:"parent_scope"`
+	StartByte     int            `json:"start_byte"`
+	EndByte       int            `json:"end_byte"`
+	StartLine     int            `json:"start_line"`
+	EndLine       int            `json:"end_line"`
+	Documentation string         `json:"documentation"`
+	Signature     string         `json:"signature"`
+	SourceCode    string         `json:"source_code"`
 }
 
 // Validate guards against writing structurally incomplete records into cache.
@@ -127,7 +113,7 @@ func (r SymbolRecord) Validate() error {
 		return fmt.Errorf("record is missing name")
 	}
 	if !r.Language.Valid() {
-		return fmt.Errorf("record has unsupported language %q, want %q or %q", r.Language, LanguageC, LanguageGo)
+		return utils.ErrUnsupportedLanguage
 	}
 	if !r.SymbolType.Valid() {
 		return fmt.Errorf("record has unsupported symbol_type %q", r.SymbolType)

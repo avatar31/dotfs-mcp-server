@@ -10,27 +10,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avatar31/dotfs-mcp-server/internal/config"
 	"github.com/avatar31/dotfs-mcp-server/internal/lsp"
-	"github.com/avatar31/dotfs-mcp-server/internal/model"
 	"github.com/avatar31/dotfs-mcp-server/internal/utils"
 )
 
 // ErrTimeout signals that a language server blew the per-call time budget. The
 // tool layer surfaces it verbatim so the agent can retry or degrade to Phase 2.
 var ErrTimeout = errors.New("xref: the language server exceeded its time budget")
-
-// Session is the slice of an LSP client the service depends on. Keeping it an
-// interface makes the whole compaction pipeline testable without a daemon.
-type Session interface {
-	EnsureOpen(ctx context.Context, path, languageID string) error
-	Call(ctx context.Context, method string, params, out any) error
-}
-
-// Provider hands out initialised sessions, one per repository and language.
-type Provider interface {
-	ClientSession(ctx context.Context, repo, repoDir string, lang model.Language) (Session, error)
-	RequestTimeout() time.Duration
-}
 
 // target is a fully validated query anchor.
 type target struct {
@@ -78,7 +65,7 @@ func New(provider Provider, workspaceRoot string, log *slog.Logger) (*Service, e
 
 	timeout := provider.RequestTimeout()
 	if timeout <= 0 {
-		timeout = lsp.DefaultRequestTimeout
+		timeout = config.DefaultRequestTimeout
 	}
 	return &Service{provider: provider, root: root, log: log, limit: MaxResults, timeout: timeout}, nil
 }

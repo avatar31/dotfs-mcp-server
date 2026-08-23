@@ -25,9 +25,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/avatar31/dotfs-mcp-server/internal/model"
-	"github.com/avatar31/dotfs-mcp-server/internal/parser"
-	"github.com/avatar31/dotfs-mcp-server/internal/store"
+	"github.com/avatar31/dotfs-mcp-server/internal/ast"
+	"github.com/avatar31/dotfs-mcp-server/internal/ast/parser"
+	"github.com/avatar31/dotfs-mcp-server/internal/ast/store"
 	"github.com/avatar31/dotfs-mcp-server/internal/utils"
 )
 
@@ -256,8 +256,8 @@ func (ix *Indexer) IndexRepo(ctx context.Context, repo string) (Summary, error) 
 
 // toRecord projects a parsed symbol onto the persisted cache schema. file_path
 // is repository-relative, so no host path ever reaches the model.
-func toRecord(repo, relPath string, sym parser.Symbol) model.SymbolRecord {
-	return model.SymbolRecord{
+func toRecord(repo, relPath string, sym parser.Symbol) ast.SymbolRecord {
+	return ast.SymbolRecord{
 		RepoName:      repo,
 		FilePath:      filepath.ToSlash(relPath),
 		Language:      sym.Language,
@@ -278,17 +278,17 @@ func toRecord(repo, relPath string, sym parser.Symbol) model.SymbolRecord {
 // SearchLive is the real-time fallback used when the cache misses: it applies
 // Phase 1 (bytes.Contains) across the workspace and only pays for Phase 2 on
 // files that literally contain the token. Matches are written back to cache.
-func (ix *Indexer) SearchLive(ctx context.Context, target string, types []model.SymbolType) ([]model.SymbolRecord, error) {
+func (ix *Indexer) SearchLive(ctx context.Context, target string, types []ast.SymbolType) ([]ast.SymbolRecord, error) {
 	repos, err := ix.ListRepos()
 	if err != nil {
 		return nil, err
 	}
-	allowed := make(map[model.SymbolType]struct{}, len(types))
+	allowed := make(map[ast.SymbolType]struct{}, len(types))
 	for _, t := range types {
 		allowed[t] = struct{}{}
 	}
 
-	var matches []model.SymbolRecord
+	var matches []ast.SymbolRecord
 	for _, repo := range repos {
 		repoPath, err := utils.SafeRepoPath(ix.opts.WorkspaceRoot, repo)
 		if err != nil {

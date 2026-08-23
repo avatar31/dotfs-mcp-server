@@ -12,8 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/avatar31/dotfs-mcp-server/internal/lsp"
 )
 
 // Default values applied when the matching environment variable is unset.
@@ -24,7 +22,29 @@ const (
 	DefaultMaxFileSize   = 2 << 20 // 2 MiB
 	DefaultServerName    = "dotfs-mcp-server"
 	DefaultServerVersion = "1.0.0"
+
+	DefaultRequestTimeout = 5 * time.Second
+	DefaultInitTimeout    = 45 * time.Second
+	DefaultGoplsPath      = "gopls"
+	DefaultClangdPath     = "clangd"
 )
+
+type LSPConfig struct {
+	// Enabled toggles the cross-reference engine. When false the
+	// four relational tools are not advertised to the MCP client at all.
+	Enabled bool
+	// GoplsPath / ClangdPath are executable names resolved through $PATH, or
+	// absolute paths to a pinned build.
+	GoplsPath  string
+	ClangdPath string
+	// ClangdArgs are appended to the generated clangd command line.
+	ClangdArgs []string
+	// RequestTimeout bounds a single language-server round trip.
+	RequestTimeout time.Duration
+	// InitTimeout bounds the initialize handshake of a cold daemon, which
+	// has to load an entire module or compilation database before answering.
+	InitTimeout time.Duration
+}
 
 // Config is the fully resolved, validated runtime configuration.
 type Config struct {
@@ -55,21 +75,8 @@ type Config struct {
 	// ServerName / ServerVersion are advertised during the MCP handshake.
 	ServerName    string
 	ServerVersion string
-
-	// LSPEnabled toggles the Phase 3 cross-reference engine. When false the
-	// four relational tools are not advertised to the MCP client at all.
-	LSPEnabled bool
-	// GoplsPath / ClangdPath are executable names resolved through $PATH, or
-	// absolute paths to a pinned build.
-	GoplsPath  string
-	ClangdPath string
-	// ClangdArgs are appended to the generated clangd command line.
-	ClangdArgs []string
-	// LSPTimeout bounds a single language-server round trip.
-	LSPTimeout time.Duration
-	// LSPInitTimeout bounds the initialize handshake of a cold daemon, which
-	// has to load an entire module or compilation database before answering.
-	LSPInitTimeout time.Duration
+	// LSPConfig holds the configuration of the cross-reference engine.
+	LSPConfig *LSPConfig
 }
 
 // Load reads the environment, applies defaults and validates the result.
@@ -83,10 +90,12 @@ func Load() (Config, error) {
 		LogLevel:         envString("DOTFS_LOG_LEVEL", "info"),
 		ServerName:       envString("DOTFS_SERVER_NAME", DefaultServerName),
 		ServerVersion:    envString("DOTFS_SERVER_VERSION", DefaultServerVersion),
-		GoplsPath:        envString("DOTFS_GOPLS_PATH", lsp.DefaultGoplsPath),
-		ClangdPath:       envString("DOTFS_CLANGD_PATH", lsp.DefaultClangdPath),
-		ClangdArgs:       envList("DOTFS_CLANGD_ARGS", nil),
-		SkipDirs:         envList("DOTFS_SKIP_DIRS", []string{".git", ".svn", ".hg", "node_modules", "vendor", "third_party", "build", "dist", "out", ".idea", ".vscode"}),
+		SkipDirs:         envList("DOTFS_SKIP_DIRS", skipDirs()),
+		LSPConfig: &LSPConfig{
+			GoplsPath:  envString("DOTFS_GOPLS_PATH", DefaultGoplsPath),
+			ClangdPath: envString("DOTFS_CLANGD_PATH", DefaultClangdPath),
+			ClangdArgs: envList("DOTFS_CLANGD_ARGS", nil),
+		},
 	}
 
 	var err error
@@ -102,16 +111,15 @@ func Load() (Config, error) {
 	if cfg.GCInterval, err = envDuration("DOTFS_GC_INTERVAL", 10*time.Minute); err != nil {
 		return Config{}, err
 	}
-	if cfg.LSPEnabled, err = envBool("DOTFS_LSP_ENABLED", true); err != nil {
+	if cfg.LSPConfig.Enabled, err = envBool("DOTFS_LSP_ENABLED", true); err != nil {
 		return Config{}, err
 	}
-	if cfg.LSPTimeout, err = envDuration("DOTFS_LSP_TIMEOUT", lsp.DefaultRequestTimeout); err != nil {
+	if cfg.LSPConfig.RequestTimeout, err = envDuration("DOTFS_LSP_TIMEOUT", DefaultRequestTimeout); err != nil {
 		return Config{}, err
 	}
-	if cfg.LSPInitTimeout, err = envDuration("DOTFS_LSP_INIT_TIMEOUT", lsp.DefaultInitTimeout); err != nil {
+	if cfg.LSPConfig.InitTimeout, err = envDuration("DOTFS_LSP_INIT_TIMEOUT", DefaultInitTimeout); err != nil {
 		return Config{}, err
 	}
-
 	if cfg.WorkspaceRoot, err = filepath.Abs(cfg.WorkspaceRoot); err != nil {
 		return Config{}, fmt.Errorf("resolve DOTFS_WORKSPACE_ROOT: %w", err)
 	}
@@ -204,4 +212,10 @@ func envDuration(key string, fallback time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("parse %s: %w", key, err)
 	}
 	return v, nil
+}
+
+func skipDirs() []string {
+	return []string{".git", ".svn", ".hg", "node_modules",
+		"vendor", "third_party", "build", "dist", "out",
+		".idea", ".vscode", "dotfs-mcp-server"}
 }

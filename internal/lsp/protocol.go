@@ -2,7 +2,7 @@
 // drive clangd and gopls as supervised child processes: JSON-RPC 2.0 framing, a
 // request/response client and a lazily initialised, per-repository daemon pool.
 //
-// Only the messages Phase 3 actually sends are modelled. Everything else the
+// Only the messages that LSP client sends are modelled. Everything else the
 // server pushes at us (progress, diagnostics, log messages) is answered
 // generically so a daemon can never block waiting on the orchestrator.
 package lsp

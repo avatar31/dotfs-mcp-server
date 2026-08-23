@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/avatar31/dotfs-mcp-server/internal/indexer"
+	"github.com/avatar31/dotfs-mcp-server/internal/ast/indexer"
 )
 
 // stubIndexer blocks inside IndexRepo until release is closed so the test can

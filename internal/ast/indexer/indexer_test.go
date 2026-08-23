@@ -9,9 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/avatar31/dotfs-mcp-server/internal/model"
-	"github.com/avatar31/dotfs-mcp-server/internal/parser"
-	"github.com/avatar31/dotfs-mcp-server/internal/store"
+	"github.com/avatar31/dotfs-mcp-server/internal/ast"
+	"github.com/avatar31/dotfs-mcp-server/internal/ast/parser"
+	"github.com/avatar31/dotfs-mcp-server/internal/ast/store"
+	"github.com/avatar31/dotfs-mcp-server/internal/utils"
 )
 
 func newTestIndexer(t *testing.T, root string) (*Indexer, *store.Store) {
@@ -73,7 +74,7 @@ func fixtureWorkspace(t *testing.T) string {
 }
 
 // lookupOne resolves exactly one cached record by exact name.
-func lookupOne(t *testing.T, st *store.Store, name string, types ...model.SymbolType) model.SymbolRecord {
+func lookupOne(t *testing.T, st *store.Store, name string, types ...ast.SymbolType) ast.SymbolRecord {
 	t.Helper()
 
 	got, err := st.Lookup(name, store.Filter{ExactOnly: true, Types: types})
@@ -105,53 +106,53 @@ func TestIndexAllPopulatesEveryConstructOfBothLanguages(t *testing.T) {
 
 	// Go constructs.
 	fn := lookupOne(t, st, "ValidateSessionToken")
-	if fn.RepoName != "auth-service-go" || fn.Language != model.LanguageGo {
+	if fn.RepoName != "auth-service-go" || fn.Language != utils.LanguageGo {
 		t.Errorf("unexpected provenance: %+v", fn)
 	}
 	if fn.FilePath != "token.go" {
 		t.Errorf("file_path must be repository-relative, got %q", fn.FilePath)
 	}
-	if fn.SymbolType != model.SymbolFunction || fn.StartLine == 0 {
+	if fn.SymbolType != ast.SymbolFunction || fn.StartLine == 0 {
 		t.Errorf("unexpected function record: %+v", fn)
 	}
-	if st := lookupOne(t, st, "Session", model.SymbolStruct); !strings.Contains(st.SourceCode, "TTL") {
+	if st := lookupOne(t, st, "Session", ast.SymbolStruct); !strings.Contains(st.SourceCode, "TTL") {
 		t.Errorf("struct body was not cached: %q", st.SourceCode)
 	}
-	if iface := lookupOne(t, st, "SessionStore", model.SymbolInterface); iface.SymbolType != model.SymbolInterface {
+	if iface := lookupOne(t, st, "SessionStore", ast.SymbolInterface); iface.SymbolType != ast.SymbolInterface {
 		t.Errorf("interface record = %+v", iface)
 	}
-	if c := lookupOne(t, st, "StatusPending", model.SymbolConstant); !strings.Contains(c.SourceCode, "iota") {
+	if c := lookupOne(t, st, "StatusPending", ast.SymbolConstant); !strings.Contains(c.SourceCode, "iota") {
 		t.Errorf("const block was not cached: %q", c.SourceCode)
 	}
-	if alias := lookupOne(t, st, "AccountID", model.SymbolTypeAlias); alias.Signature != "type AccountID = string" {
+	if alias := lookupOne(t, st, "AccountID", ast.SymbolTypeAlias); alias.Signature != "type AccountID = string" {
 		t.Errorf("type alias signature = %q", alias.Signature)
 	}
 
 	// C constructs.
-	macro := lookupOne(t, st, "ROUTER_QUEUE_DEPTH", model.SymbolMacro)
-	if macro.RepoName != "packet-router-c" || macro.Language != model.LanguageC {
+	macro := lookupOne(t, st, "ROUTER_QUEUE_DEPTH", ast.SymbolMacro)
+	if macro.RepoName != "packet-router-c" || macro.Language != utils.LanguageC {
 		t.Errorf("unexpected macro provenance: %+v", macro)
 	}
-	if fnMacro := lookupOne(t, st, "ROUTER_MIN", model.SymbolMacroFunction); fnMacro.Signature != "#define ROUTER_MIN(a, b)" {
+	if fnMacro := lookupOne(t, st, "ROUTER_MIN", ast.SymbolMacroFunction); fnMacro.Signature != "#define ROUTER_MIN(a, b)" {
 		t.Errorf("macro function signature = %q", fnMacro.Signature)
 	}
-	if rec := lookupOne(t, st, "router_ops", model.SymbolStruct); !strings.Contains(rec.SourceCode, "(*open)") {
+	if rec := lookupOne(t, st, "router_ops", ast.SymbolStruct); !strings.Contains(rec.SourceCode, "(*open)") {
 		t.Errorf("v-table body was not cached: %q", rec.SourceCode)
 	}
-	if td := lookupOne(t, st, "router_status_t", model.SymbolTypedef); td.SymbolType != model.SymbolTypedef {
+	if td := lookupOne(t, st, "router_status_t", ast.SymbolTypedef); td.SymbolType != ast.SymbolTypedef {
 		t.Errorf("typedef record = %+v", td)
 	}
-	if e := lookupOne(t, st, "router_priority", model.SymbolEnum); e.SymbolType != model.SymbolEnum {
+	if e := lookupOne(t, st, "router_priority", ast.SymbolEnum); e.SymbolType != ast.SymbolEnum {
 		t.Errorf("enum record = %+v", e)
 	}
-	if quota := lookupOne(t, st, "ROUTER_ERR_NO_QUOTA", model.SymbolConstant); quota.ParentScope != "router_status_t" {
+	if quota := lookupOne(t, st, "ROUTER_ERR_NO_QUOTA", ast.SymbolConstant); quota.ParentScope != "router_status_t" {
 		t.Errorf("enumerator scope = %q", quota.ParentScope)
 	}
 
 	// The Go method must be addressable under both its plain and qualified name.
 	plain := lookupOne(t, st, "Issue")
 	qualified := lookupOne(t, st, "Issuer.Issue")
-	if plain.SourceCode != qualified.SourceCode || qualified.SymbolType != model.SymbolMethod {
+	if plain.SourceCode != qualified.SourceCode || qualified.SymbolType != ast.SymbolMethod {
 		t.Errorf("method alias did not resolve to the same record: %+v vs %+v", plain, qualified)
 	}
 }
@@ -210,7 +211,7 @@ func TestSearchLiveBackfillsTheCache(t *testing.T) {
 		t.Fatal("the cache should start empty")
 	}
 
-	matches, err := ix.SearchLive(context.Background(), "read_session_header", model.CallableTypes)
+	matches, err := ix.SearchLive(context.Background(), "read_session_header", ast.CallableTypes)
 	if err != nil {
 		t.Fatalf("live scan: %v", err)
 	}
@@ -226,7 +227,7 @@ func TestSearchLiveBackfillsTheCache(t *testing.T) {
 	}
 
 	// A type filter must exclude a callable match.
-	none, err := ix.SearchLive(context.Background(), "read_session_header", []model.SymbolType{model.SymbolStruct})
+	none, err := ix.SearchLive(context.Background(), "read_session_header", []ast.SymbolType{ast.SymbolStruct})
 	if err != nil {
 		t.Fatalf("filtered live scan: %v", err)
 	}

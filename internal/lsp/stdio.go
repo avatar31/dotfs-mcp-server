@@ -17,8 +17,8 @@ type stdio struct {
 	writeMu sync.Mutex
 	writer  io.WriteCloser
 
-	reader  *textproto.Reader
-	log     *slog.Logger
+	reader *textproto.Reader
+	log    *slog.Logger
 }
 
 // newStdio wraps r with the buffering the header parser requires.
@@ -31,7 +31,7 @@ func newStdio(w io.WriteCloser, r io.Reader, log *slog.Logger) *stdio {
 }
 
 // readLoop decodes frames until the stream ends or breaks.
-func (s *stdio) readLoop(clientName string, dispatch func (msg inboundMessage)) error {
+func (s *stdio) readLoop(clientName string, dispatch func(msg inboundMessage)) error {
 	for {
 		payload, err := s.read()
 		if err != nil {

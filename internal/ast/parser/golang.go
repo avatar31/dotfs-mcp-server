@@ -10,7 +10,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/avatar31/dotfs-mcp-server/internal/model"
+	model "github.com/avatar31/dotfs-mcp-server/internal/ast"
+	"github.com/avatar31/dotfs-mcp-server/internal/utils"
 )
 
 // GoEngine extracts every top-level declaration from a Go file using the
@@ -22,7 +23,7 @@ type GoEngine struct{}
 func NewGoEngine() *GoEngine { return &GoEngine{} }
 
 // Language implements Engine.
-func (*GoEngine) Language() model.Language { return model.LanguageGo }
+func (*GoEngine) Language() utils.Language { return utils.LanguageGo }
 
 // Extensions implements Engine.
 func (*GoEngine) Extensions() []string { return []string{".go"} }
@@ -102,7 +103,7 @@ func (g goDecl) function(fn *ast.FuncDecl) (Symbol, bool) {
 		Type:          model.SymbolFunction,
 		Documentation: cleanComment(fn.Doc.Text()),
 		SourceCode:    string(g.src[sb:eb]),
-		Language:      model.LanguageGo,
+		Language:      utils.LanguageGo,
 		StartByte:     sb,
 		EndByte:       eb,
 		StartLine:     sl,
@@ -175,7 +176,7 @@ func (g goDecl) typeSpec(decl *ast.GenDecl, ts *ast.TypeSpec) (Symbol, bool) {
 		ParentScope:   "",
 		Documentation: cleanComment(doc),
 		SourceCode:    source,
-		Language:      model.LanguageGo,
+		Language:      utils.LanguageGo,
 		StartByte:     sb,
 		EndByte:       eb,
 		StartLine:     sl,
@@ -258,7 +259,7 @@ func (g goDecl) valueSpecs(decl *ast.GenDecl) []Symbol {
 				Signature:     keyword + " " + firstLine(string(g.src[sb:eb])),
 				Documentation: cleanComment(doc),
 				SourceCode:    block,
-				Language:      model.LanguageGo,
+				Language:      utils.LanguageGo,
 				StartByte:     sb,
 				EndByte:       eb,
 				StartLine:     sl,

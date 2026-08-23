@@ -10,7 +10,8 @@ import (
 	sitter "github.com/smacker/go-tree-sitter"
 	tsc "github.com/smacker/go-tree-sitter/c"
 
-	"github.com/avatar31/dotfs-mcp-server/internal/model"
+	"github.com/avatar31/dotfs-mcp-server/internal/ast"
+	"github.com/avatar31/dotfs-mcp-server/internal/utils"
 )
 
 // CEngine extracts C declarations with the Tree-sitter C grammar: function
@@ -26,7 +27,7 @@ type CEngine struct{}
 func NewCEngine() *CEngine { return &CEngine{} }
 
 // Language implements Engine.
-func (*CEngine) Language() model.Language { return model.LanguageC }
+func (*CEngine) Language() utils.Language { return utils.LanguageC }
 
 // Extensions implements Engine.
 func (*CEngine) Extensions() []string { return []string{".c", ".h"} }
@@ -136,7 +137,7 @@ func nodeSpan(node *sitter.Node, src []byte) (sb, eb, sl, el int, ok bool) {
 }
 
 // newCSymbol fills in every field shared by the C symbol kinds.
-func newCSymbol(node *sitter.Node, src []byte, name string, kind model.SymbolType) (Symbol, bool) {
+func newCSymbol(node *sitter.Node, src []byte, name string, kind ast.SymbolType) (Symbol, bool) {
 	if strings.TrimSpace(name) == "" {
 		return Symbol{}, false
 	}
@@ -151,7 +152,7 @@ func newCSymbol(node *sitter.Node, src []byte, name string, kind model.SymbolTyp
 		Signature:     firstLine(source),
 		Documentation: docForNode(node, src),
 		SourceCode:    source,
-		Language:      model.LanguageC,
+		Language:      utils.LanguageC,
 		StartByte:     sb,
 		EndByte:       eb,
 		StartLine:     sl,
@@ -162,7 +163,7 @@ func newCSymbol(node *sitter.Node, src []byte, name string, kind model.SymbolTyp
 // cFunctionDefinition handles (function_definition).
 func cFunctionDefinition(node *sitter.Node, src []byte) (Symbol, bool) {
 	declarator := node.ChildByFieldName("declarator")
-	sym, ok := newCSymbol(node, src, declaratorName(declarator, src), model.SymbolFunction)
+	sym, ok := newCSymbol(node, src, declaratorName(declarator, src), ast.SymbolFunction)
 	if !ok {
 		return Symbol{}, false
 	}
@@ -187,7 +188,7 @@ func cPrototype(node *sitter.Node, src []byte) (Symbol, bool) {
 	if inner == nil || inner.Type() != "identifier" {
 		return Symbol{}, false
 	}
-	sym, ok := newCSymbol(node, src, inner.Content(src), model.SymbolFunction)
+	sym, ok := newCSymbol(node, src, inner.Content(src), ast.SymbolFunction)
 	if !ok {
 		return Symbol{}, false
 	}
@@ -201,7 +202,7 @@ func cObjectMacro(node *sitter.Node, src []byte) (Symbol, bool) {
 	if name == nil {
 		return Symbol{}, false
 	}
-	sym, ok := newCSymbol(node, src, name.Content(src), model.SymbolMacro)
+	sym, ok := newCSymbol(node, src, name.Content(src), ast.SymbolMacro)
 	if !ok {
 		return Symbol{}, false
 	}
@@ -219,7 +220,7 @@ func cFunctionMacro(node *sitter.Node, src []byte) (Symbol, bool) {
 	if name == nil {
 		return Symbol{}, false
 	}
-	sym, ok := newCSymbol(node, src, name.Content(src), model.SymbolMacroFunction)
+	sym, ok := newCSymbol(node, src, name.Content(src), ast.SymbolMacroFunction)
 	if !ok {
 		return Symbol{}, false
 	}
@@ -241,7 +242,7 @@ func cRecord(node *sitter.Node, src []byte) (Symbol, bool) {
 	}
 	// Both struct and union map onto the struct symbol_type; the signature keeps
 	// the distinction visible to the model.
-	sym, ok := newCSymbol(node, src, name.Content(src), model.SymbolStruct)
+	sym, ok := newCSymbol(node, src, name.Content(src), ast.SymbolStruct)
 	if !ok {
 		return Symbol{}, false
 	}
@@ -295,7 +296,7 @@ func cEnum(node *sitter.Node, src []byte) []Symbol {
 
 	var out []Symbol
 	if name := node.ChildByFieldName("name"); name != nil {
-		if sym, ok := newCSymbol(node, src, name.Content(src), model.SymbolEnum); ok {
+		if sym, ok := newCSymbol(node, src, name.Content(src), ast.SymbolEnum); ok {
 			sym.Signature = "enum " + sym.Name
 			out = append(out, sym)
 		}
@@ -326,12 +327,12 @@ func cEnum(node *sitter.Node, src []byte) []Symbol {
 		}
 		out = append(out, Symbol{
 			Name:          name.Content(src),
-			Type:          model.SymbolConstant,
+			Type:          ast.SymbolConstant,
 			ParentScope:   scope,
 			Signature:     firstLine(string(src[sb:eb])),
 			Documentation: enumDoc,
 			SourceCode:    block,
-			Language:      model.LanguageC,
+			Language:      utils.LanguageC,
 			StartByte:     sb,
 			EndByte:       eb,
 			StartLine:     sl,
@@ -356,7 +357,7 @@ func cTypedefs(node *sitter.Node, src []byte) []Symbol {
 		if name == "" {
 			continue
 		}
-		sym, ok := newCSymbol(node, src, name, model.SymbolTypedef)
+		sym, ok := newCSymbol(node, src, name, ast.SymbolTypedef)
 		if !ok {
 			continue
 		}

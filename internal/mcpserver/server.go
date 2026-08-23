@@ -14,11 +14,11 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpsrv "github.com/mark3labs/mcp-go/server"
 
+	model "github.com/avatar31/dotfs-mcp-server/internal/ast"
+	"github.com/avatar31/dotfs-mcp-server/internal/ast/indexer"
+	"github.com/avatar31/dotfs-mcp-server/internal/ast/store"
 	"github.com/avatar31/dotfs-mcp-server/internal/capabilities"
-	"github.com/avatar31/dotfs-mcp-server/internal/indexer"
 	"github.com/avatar31/dotfs-mcp-server/internal/lsp"
-	"github.com/avatar31/dotfs-mcp-server/internal/model"
-	"github.com/avatar31/dotfs-mcp-server/internal/store"
 	"github.com/avatar31/dotfs-mcp-server/internal/utils"
 	"github.com/avatar31/dotfs-mcp-server/internal/xref"
 )

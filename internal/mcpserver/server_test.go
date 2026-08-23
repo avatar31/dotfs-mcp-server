@@ -11,30 +11,31 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/avatar31/dotfs-mcp-server/internal/ast"
+	"github.com/avatar31/dotfs-mcp-server/internal/ast/store"
 	"github.com/avatar31/dotfs-mcp-server/internal/capabilities"
-	"github.com/avatar31/dotfs-mcp-server/internal/model"
-	"github.com/avatar31/dotfs-mcp-server/internal/store"
+	"github.com/avatar31/dotfs-mcp-server/internal/utils"
 )
 
 // stubCache is an in-memory Cache honouring the prefix, type and repo filters.
 type stubCache struct {
-	records []model.SymbolRecord
+	records []ast.SymbolRecord
 	stats   map[string]store.RepoStat
 	err     error
 	calls   int
 }
 
-func (s *stubCache) Lookup(name string, f store.Filter) ([]model.SymbolRecord, error) {
+func (s *stubCache) Lookup(name string, f store.Filter) ([]ast.SymbolRecord, error) {
 	s.calls++
 	if s.err != nil {
 		return nil, s.err
 	}
-	allowed := make(map[model.SymbolType]struct{}, len(f.Types))
+	allowed := make(map[ast.SymbolType]struct{}, len(f.Types))
 	for _, t := range f.Types {
 		allowed[t] = struct{}{}
 	}
 
-	var out []model.SymbolRecord
+	var out []ast.SymbolRecord
 	for _, rec := range s.records {
 		if f.ExactOnly && rec.Name != name && !slicesContains(rec.Aliases, name) {
 			continue
@@ -67,7 +68,7 @@ func slicesContains(list []string, want string) bool {
 }
 
 type stubScanner struct {
-	records []model.SymbolRecord
+	records []ast.SymbolRecord
 	err     error
 	calls   int
 	snippet string
@@ -75,7 +76,7 @@ type stubScanner struct {
 	gotArgs []any
 }
 
-func (s *stubScanner) SearchLive(_ context.Context, target string, types []model.SymbolType) ([]model.SymbolRecord, error) {
+func (s *stubScanner) SearchLive(_ context.Context, target string, types []ast.SymbolType) ([]ast.SymbolRecord, error) {
 	s.calls++
 	s.gotArgs = []any{target, types}
 	return s.records, s.err
@@ -119,10 +120,10 @@ func resultText(t *testing.T, res *mcp.CallToolResult) string {
 	return text.Text
 }
 
-func sym(repo, name string, kind model.SymbolType, lang model.Language) model.SymbolRecord {
-	return model.SymbolRecord{
+func sym(repo, name string, kind ast.SymbolType, lang utils.Language) ast.SymbolRecord {
+	return ast.SymbolRecord{
 		RepoName:      repo,
-		FilePath:      "src/main" + map[model.Language]string{model.LanguageC: ".c", model.LanguageGo: ".go"}[lang],
+		FilePath:      "src/main" + map[utils.Language]string{utils.LanguageC: ".c", utils.LanguageGo: ".go"}[lang],
 		Language:      lang,
 		SymbolType:    kind,
 		Name:          name,
@@ -150,9 +151,9 @@ func TestNewRegistersTheFullToolkit(t *testing.T) {
 }
 
 func TestGlobalSearchReturnsCachedRecordAsJSON(t *testing.T) {
-	rec := sym("packet-router-c", "read_session_header", model.SymbolFunction, model.LanguageC)
+	rec := sym("packet-router-c", "read_session_header", ast.SymbolFunction, utils.LanguageC)
 	scanner := &stubScanner{}
-	deps := newDeps(&stubCache{records: []model.SymbolRecord{rec}}, scanner, nil)
+	deps := newDeps(&stubCache{records: []ast.SymbolRecord{rec}}, scanner, nil)
 
 	res, err := deps.handleGlobalSearch(context.Background(), callTool(t, map[string]any{
 		"target_function_name": "read_session_header",
@@ -167,18 +168,18 @@ func TestGlobalSearchReturnsCachedRecordAsJSON(t *testing.T) {
 		t.Error("a cache hit must not trigger a live scan")
 	}
 
-	var got model.SymbolRecord
+	var got ast.SymbolRecord
 	if err := json.Unmarshal([]byte(resultText(t, res)), &got); err != nil {
 		t.Fatalf("payload is not a JSON object: %v", err)
 	}
-	if got.Name != rec.Name || got.SymbolType != model.SymbolFunction || got.StartLine != 4 {
+	if got.Name != rec.Name || got.SymbolType != ast.SymbolFunction || got.StartLine != 4 {
 		t.Errorf("payload lost fields: %+v", got)
 	}
 }
 
 func TestGlobalSearchFallsBackToLiveScan(t *testing.T) {
-	live := sym("packet-router-c", "route_packet", model.SymbolFunction, model.LanguageC)
-	scanner := &stubScanner{records: []model.SymbolRecord{live}}
+	live := sym("packet-router-c", "route_packet", ast.SymbolFunction, utils.LanguageC)
+	scanner := &stubScanner{records: []ast.SymbolRecord{live}}
 	deps := newDeps(&stubCache{}, scanner, nil)
 
 	res, err := deps.handleGlobalSearch(context.Background(), callTool(t, map[string]any{
@@ -193,7 +194,7 @@ func TestGlobalSearchFallsBackToLiveScan(t *testing.T) {
 	if scanner.calls != 1 {
 		t.Errorf("live scan ran %d times, want 1", scanner.calls)
 	}
-	if types, ok := scanner.gotArgs[1].([]model.SymbolType); !ok || len(types) != 2 {
+	if types, ok := scanner.gotArgs[1].([]ast.SymbolType); !ok || len(types) != 2 {
 		t.Errorf("global search must restrict the live scan to callables, got %v", scanner.gotArgs[1])
 	}
 	if !strings.Contains(resultText(t, res), "route_packet") {
@@ -240,10 +241,10 @@ func TestGlobalSearchSurfacesCacheFailures(t *testing.T) {
 }
 
 func TestLookupSymbolSupportsPrefixAndFilters(t *testing.T) {
-	cache := &stubCache{records: []model.SymbolRecord{
-		sym("nfs-ganesha", "ERR_FSAL_NO_QUOTA", model.SymbolMacro, model.LanguageC),
-		sym("nfs-ganesha", "ERR_FSAL_STALE", model.SymbolMacro, model.LanguageC),
-		sym("auth-service-go", "ERR_FSAL_HANDLE", model.SymbolStruct, model.LanguageGo),
+	cache := &stubCache{records: []ast.SymbolRecord{
+		sym("nfs-ganesha", "ERR_FSAL_NO_QUOTA", ast.SymbolMacro, utils.LanguageC),
+		sym("nfs-ganesha", "ERR_FSAL_STALE", ast.SymbolMacro, utils.LanguageC),
+		sym("auth-service-go", "ERR_FSAL_HANDLE", ast.SymbolStruct, utils.LanguageGo),
 	}}
 	deps := newDeps(cache, &stubScanner{}, nil)
 
@@ -251,7 +252,7 @@ func TestLookupSymbolSupportsPrefixAndFilters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	var all []model.SymbolRecord
+	var all []ast.SymbolRecord
 	if err := json.Unmarshal([]byte(resultText(t, res)), &all); err != nil {
 		t.Fatalf("payload is not a JSON array: %v", err)
 	}
@@ -267,7 +268,7 @@ func TestLookupSymbolSupportsPrefixAndFilters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	var filtered []model.SymbolRecord
+	var filtered []ast.SymbolRecord
 	if err := json.Unmarshal([]byte(resultText(t, res)), &filtered); err != nil {
 		t.Fatalf("payload is not a JSON array: %v", err)
 	}
@@ -291,9 +292,9 @@ func TestLookupSymbolSupportsPrefixAndFilters(t *testing.T) {
 }
 
 func TestGetTypeDefinitionRestrictsToTypeKinds(t *testing.T) {
-	cache := &stubCache{records: []model.SymbolRecord{
-		sym("nfs-ganesha", "fsal_obj_handle", model.SymbolStruct, model.LanguageC),
-		sym("nfs-ganesha", "fsal_obj_handle", model.SymbolFunction, model.LanguageC),
+	cache := &stubCache{records: []ast.SymbolRecord{
+		sym("nfs-ganesha", "fsal_obj_handle", ast.SymbolStruct, utils.LanguageC),
+		sym("nfs-ganesha", "fsal_obj_handle", ast.SymbolFunction, utils.LanguageC),
 	}}
 	deps := newDeps(cache, &stubScanner{}, nil)
 
@@ -303,11 +304,11 @@ func TestGetTypeDefinitionRestrictsToTypeKinds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	var got []model.SymbolRecord
+	var got []ast.SymbolRecord
 	if err := json.Unmarshal([]byte(resultText(t, res)), &got); err != nil {
 		t.Fatalf("payload is not a JSON array: %v", err)
 	}
-	if len(got) != 1 || got[0].SymbolType != model.SymbolStruct {
+	if len(got) != 1 || got[0].SymbolType != ast.SymbolStruct {
 		t.Fatalf("type lookup returned %+v", got)
 	}
 
@@ -321,9 +322,9 @@ func TestGetTypeDefinitionRestrictsToTypeKinds(t *testing.T) {
 }
 
 func TestLookupMacroOrConstRestrictsToValueKinds(t *testing.T) {
-	cache := &stubCache{records: []model.SymbolRecord{
-		sym("auth-service-go", "StatusPending", model.SymbolConstant, model.LanguageGo),
-		sym("auth-service-go", "StatusPending", model.SymbolInterface, model.LanguageGo),
+	cache := &stubCache{records: []ast.SymbolRecord{
+		sym("auth-service-go", "StatusPending", ast.SymbolConstant, utils.LanguageGo),
+		sym("auth-service-go", "StatusPending", ast.SymbolInterface, utils.LanguageGo),
 	}}
 	deps := newDeps(cache, &stubScanner{}, nil)
 
@@ -331,11 +332,11 @@ func TestLookupMacroOrConstRestrictsToValueKinds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	var got []model.SymbolRecord
+	var got []ast.SymbolRecord
 	if err := json.Unmarshal([]byte(resultText(t, res)), &got); err != nil {
 		t.Fatalf("payload is not a JSON array: %v", err)
 	}
-	if len(got) != 1 || got[0].SymbolType != model.SymbolConstant {
+	if len(got) != 1 || got[0].SymbolType != ast.SymbolConstant {
 		t.Fatalf("macro lookup returned %+v", got)
 	}
 }

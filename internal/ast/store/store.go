@@ -26,7 +26,7 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 
-	"github.com/avatar31/dotfs-mcp-server/internal/model"
+	"github.com/avatar31/dotfs-mcp-server/internal/ast"
 )
 
 const (
@@ -54,7 +54,7 @@ type Filter struct {
 	// Repo restricts results to one repository ("" means every repository).
 	Repo string
 	// Types restricts results to the listed symbol kinds (nil means all kinds).
-	Types []model.SymbolType
+	Types []ast.SymbolType
 	// ExactOnly rejects prefix matches, keeping only identical identifiers.
 	ExactOnly bool
 	// Limit caps the number of returned records (<= 0 means DefaultLookupLimit).
@@ -118,25 +118,25 @@ func esc(part string) string { return strings.ReplaceAll(part, ":", "%3A") }
 func offsetToken(off int) string { return fmt.Sprintf("%08d", off) }
 
 // PrimaryKey builds sym:<repo>:<file_path>:<symbol_type>:<name>:<offset>.
-func PrimaryKey(rec model.SymbolRecord) string {
+func PrimaryKey(rec ast.SymbolRecord) string {
 	return symPrefix + esc(rec.RepoName) + ":" + esc(rec.FilePath) + ":" +
 		esc(string(rec.SymbolType)) + ":" + esc(rec.Name) + ":" + offsetToken(rec.StartByte)
 }
 
 // nameIndexKey builds idx:name:<name>:<repo>:<file_path>:<offset>.
-func nameIndexKey(name string, rec model.SymbolRecord) string {
+func nameIndexKey(name string, rec ast.SymbolRecord) string {
 	return nameIdxPrefix + esc(name) + ":" + esc(rec.RepoName) + ":" +
 		esc(rec.FilePath) + ":" + offsetToken(rec.StartByte)
 }
 
 // typeIndexKey builds idx:type:<symbol_type>:<name>:<repo>:<file_path>:<offset>.
-func typeIndexKey(name string, rec model.SymbolRecord) string {
+func typeIndexKey(name string, rec ast.SymbolRecord) string {
 	return typeIdxPrefix + esc(string(rec.SymbolType)) + ":" + esc(name) + ":" +
 		esc(rec.RepoName) + ":" + esc(rec.FilePath) + ":" + offsetToken(rec.StartByte)
 }
 
 // fileIndexKey builds idx:file:<repo>:<file_path>:<offset>.
-func fileIndexKey(rec model.SymbolRecord) string {
+func fileIndexKey(rec ast.SymbolRecord) string {
 	return fileIdxPrefix + esc(rec.RepoName) + ":" + esc(rec.FilePath) + ":" + offsetToken(rec.StartByte)
 }
 
@@ -151,7 +151,7 @@ func fileSymbolPrefix(repo, file string) []byte {
 
 // indexKeys returns every secondary key that must accompany rec, covering the
 // canonical name and each declared alias.
-func indexKeys(rec model.SymbolRecord) []string {
+func indexKeys(rec ast.SymbolRecord) []string {
 	names := append([]string{rec.Name}, rec.Aliases...)
 	keys := make([]string, 0, 2*len(names)+1)
 	seen := make(map[string]struct{}, len(names))
@@ -171,7 +171,7 @@ func indexKeys(rec model.SymbolRecord) []string {
 // PutSymbol writes a record only when it differs from the cached copy
 // (structural delta check) and refreshes every secondary index. It returns the
 // primary key together with a flag reporting whether a physical write occurred.
-func (s *Store) PutSymbol(rec model.SymbolRecord) (string, bool, error) {
+func (s *Store) PutSymbol(rec ast.SymbolRecord) (string, bool, error) {
 	if err := rec.Validate(); err != nil {
 		return "", false, fmt.Errorf("invalid record for %q: %w", rec.Name, err)
 	}
@@ -187,7 +187,7 @@ func (s *Store) PutSymbol(rec model.SymbolRecord) (string, bool, error) {
 		item, err := txn.Get([]byte(primary))
 		switch {
 		case err == nil:
-			var existing model.SymbolRecord
+			var existing ast.SymbolRecord
 			verr := item.Value(func(val []byte) error { return json.Unmarshal(val, &existing) })
 			if verr == nil && existing.Fingerprint() == rec.Fingerprint() {
 				// No structural delta: refresh the indexes and skip the write.
@@ -213,7 +213,7 @@ func (s *Store) PutSymbol(rec model.SymbolRecord) (string, bool, error) {
 	return primary, changed, nil
 }
 
-func writeIndexes(txn *badger.Txn, rec model.SymbolRecord, primary string) error {
+func writeIndexes(txn *badger.Txn, rec ast.SymbolRecord, primary string) error {
 	for _, key := range indexKeys(rec) {
 		if err := txn.Set([]byte(key), []byte(primary)); err != nil {
 			return err
@@ -232,7 +232,7 @@ type candidate struct {
 // Lookup resolves a symbol by exact name or name prefix. Supplying Filter.Types
 // switches the scan to the type-partitioned index, which keeps a query such as
 // "every struct called fsal_*" proportional to the result set.
-func (s *Store) Lookup(name string, f Filter) ([]model.SymbolRecord, error) {
+func (s *Store) Lookup(name string, f Filter) ([]ast.SymbolRecord, error) {
 	query := strings.TrimSpace(name)
 	if query == "" {
 		return nil, errors.New("lookup requires a non-empty symbol name")
@@ -251,7 +251,7 @@ func (s *Store) Lookup(name string, f Filter) ([]model.SymbolRecord, error) {
 		}
 	}
 
-	var records []model.SymbolRecord
+	var records []ast.SymbolRecord
 	err := s.db.View(func(txn *badger.Txn) error {
 		seen := make(map[string]struct{})
 		var cands []candidate
@@ -291,7 +291,7 @@ func (s *Store) Lookup(name string, f Filter) ([]model.SymbolRecord, error) {
 			if err != nil {
 				return err
 			}
-			var rec model.SymbolRecord
+			var rec ast.SymbolRecord
 			if err := item.Value(func(val []byte) error { return json.Unmarshal(val, &rec) }); err != nil {
 				return err
 			}
@@ -339,8 +339,8 @@ func matchedName(key string, typed bool) (string, bool) {
 
 // sortRecords puts exact identifier matches first, then orders deterministically
 // so repeated tool calls return a stable document.
-func sortRecords(records []model.SymbolRecord, query string) {
-	rank := func(r model.SymbolRecord) int {
+func sortRecords(records []ast.SymbolRecord, query string) {
+	rank := func(r ast.SymbolRecord) int {
 		if r.Name == query {
 			return 0
 		}
@@ -369,7 +369,7 @@ func sortRecords(records []model.SymbolRecord, query string) {
 }
 
 // FileSymbols returns every symbol recorded for one file, in source order.
-func (s *Store) FileSymbols(repo, file string) ([]model.SymbolRecord, error) {
+func (s *Store) FileSymbols(repo, file string) ([]ast.SymbolRecord, error) {
 	prefix := fileSymbolPrefix(repo, file)
 	records, err := s.scanRecords(prefix)
 	if err != nil {
@@ -408,7 +408,7 @@ func (s *Store) RepoSymbolKeys(repo string) ([]string, error) {
 func (s *Store) PruneRepo(repo string, keep map[string]struct{}) (int, error) {
 	prefix := repoSymbolPrefix(repo)
 
-	var stale []model.SymbolRecord
+	var stale []ast.SymbolRecord
 	var staleKeys []string
 	err := s.db.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
@@ -422,7 +422,7 @@ func (s *Store) PruneRepo(repo string, keep map[string]struct{}) (int, error) {
 			if _, live := keep[key]; live {
 				continue
 			}
-			var rec model.SymbolRecord
+			var rec ast.SymbolRecord
 			if err := item.Value(func(val []byte) error { return json.Unmarshal(val, &rec) }); err != nil {
 				// A corrupt payload still has to go; the key alone is enough.
 				s.log.Warn("dropping unreadable cache record", "key", key, "error", err)
@@ -466,8 +466,8 @@ func (s *Store) PruneRepo(repo string, keep map[string]struct{}) (int, error) {
 }
 
 // scanRecords materialises every record stored under prefix.
-func (s *Store) scanRecords(prefix []byte) ([]model.SymbolRecord, error) {
-	var records []model.SymbolRecord
+func (s *Store) scanRecords(prefix []byte) ([]ast.SymbolRecord, error) {
+	var records []ast.SymbolRecord
 	err := s.db.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.Prefix = prefix
@@ -475,7 +475,7 @@ func (s *Store) scanRecords(prefix []byte) ([]model.SymbolRecord, error) {
 		defer it.Close()
 
 		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-			var rec model.SymbolRecord
+			var rec ast.SymbolRecord
 			if err := it.Item().Value(func(val []byte) error { return json.Unmarshal(val, &rec) }); err != nil {
 				return err
 			}
@@ -502,7 +502,7 @@ func (s *Store) Stats() (map[string]RepoStat, error) {
 		defer it.Close()
 
 		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-			var rec model.SymbolRecord
+			var rec ast.SymbolRecord
 			if err := it.Item().Value(func(val []byte) error { return json.Unmarshal(val, &rec) }); err != nil {
 				return err
 			}
@@ -517,7 +517,7 @@ func (s *Store) Stats() (map[string]RepoStat, error) {
 				}
 			}
 			stat.Symbols++
-			if rec.SymbolType == model.SymbolFunction || rec.SymbolType == model.SymbolMethod {
+			if rec.SymbolType == ast.SymbolFunction || rec.SymbolType == ast.SymbolMethod {
 				stat.Functions++
 			}
 			stat.Languages[string(rec.Language)]++

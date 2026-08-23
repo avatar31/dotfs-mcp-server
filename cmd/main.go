@@ -17,14 +17,14 @@ import (
 
 	mcpsrv "github.com/mark3labs/mcp-go/server"
 
+	"github.com/avatar31/dotfs-mcp-server/internal/ast/indexer"
+	"github.com/avatar31/dotfs-mcp-server/internal/ast/parser"
+	"github.com/avatar31/dotfs-mcp-server/internal/ast/store"
 	"github.com/avatar31/dotfs-mcp-server/internal/capabilities"
 	"github.com/avatar31/dotfs-mcp-server/internal/config"
 	"github.com/avatar31/dotfs-mcp-server/internal/httpapi"
-	"github.com/avatar31/dotfs-mcp-server/internal/indexer"
 	"github.com/avatar31/dotfs-mcp-server/internal/lsp"
 	"github.com/avatar31/dotfs-mcp-server/internal/mcpserver"
-	"github.com/avatar31/dotfs-mcp-server/internal/parser"
-	"github.com/avatar31/dotfs-mcp-server/internal/store"
 	"github.com/avatar31/dotfs-mcp-server/internal/xref"
 )
 
@@ -113,7 +113,7 @@ func run() error {
 
 	// The language-server pool is created eagerly but spawns nothing
 	// until a relational tool is actually called.
-	crossRef, closeLSP, err := startCrossReference(cfg, logger)
+	crossRef, closeLSP, err := startCrossReference(&cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -167,30 +167,21 @@ func run() error {
 	return runErr
 }
 
-func startCrossReference(cfg config.Config, logger *slog.Logger) (mcpserver.CrossReference, func(), error) {
-	if !cfg.LSPEnabled {
+func startCrossReference(cfg *config.Config, logger *slog.Logger) (mcpserver.CrossReference, func(), error) {
+	if !cfg.LSPConfig.Enabled {
 		logger.Info("cross-reference engine disabled", "reason", "DOTFS_LSP_ENABLED=false")
 		return nil, func() {}, nil
 	}
 
-	manager := lsp.NewManager(lsp.Config{
-		Enabled:        true,
-		GoplsPath:      cfg.GoplsPath,
-		ClangdPath:     cfg.ClangdPath,
-		ClangdArgs:     cfg.ClangdArgs,
-		RequestTimeout: cfg.LSPTimeout,
-		InitTimeout:    cfg.LSPInitTimeout,
-		ClientName:     cfg.ServerName,
-		ClientVersion:  cfg.ServerVersion,
-	}, logger.With("component", "lsp"))
+	manager := lsp.NewManager(cfg, logger.With("component", "lsp"))
 
-	service, err := xref.New(manager, cfg.WorkspaceRoot, logger.With("component", "xref"))
+	service, err := xref.New(xref.FromManager(manager), cfg.WorkspaceRoot, logger.With("component", "xref"))
 	if err != nil {
 		return nil, nil, err
 	}
 
 	logger.Info("cross-reference engine ready",
-		"gopls", cfg.GoplsPath, "clangd", cfg.ClangdPath, "request_timeout", cfg.LSPTimeout)
+		"gopls", cfg.LSPConfig.GoplsPath, "clangd", cfg.LSPConfig.ClangdPath, "request_timeout", cfg.LSPConfig.RequestTimeout)
 
 	shutdown := func() {
 		// Detached from the root context, which is already cancelled by now:

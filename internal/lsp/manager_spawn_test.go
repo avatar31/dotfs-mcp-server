@@ -4,19 +4,24 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/avatar31/dotfs-mcp-server/internal/model"
+	"github.com/avatar31/dotfs-mcp-server/internal/config"
+	"github.com/avatar31/dotfs-mcp-server/internal/utils"
 )
 
 // fakeDaemonEnv makes the test binary re-execute itself as a minimal language
 // server. A compiled stand-in is used instead of a shell script because a shell
 // block-buffers its stdout when it is a pipe, which makes the handshake race.
 const fakeDaemonEnv = "DOTFS_TEST_FAKE_LSP"
+
+func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 func TestMain(m *testing.M) {
 	if counter := os.Getenv(fakeDaemonEnv); counter != "" {
@@ -74,7 +79,8 @@ func fakeDaemonManager(t *testing.T) (*Manager, string, string) {
 		t.Fatalf("locate the test binary: %v", err)
 	}
 
-	mgr := NewManager(Config{Enabled: true, GoplsPath: self, InitTimeout: 10 * time.Second}, discardLogger())
+	cfg := &config.Config{LSPConfig: &config.LSPConfig{Enabled: true, GoplsPath: self, InitTimeout: 10 * time.Second}}
+	mgr := NewManager(cfg, discardLogger())
 	t.Cleanup(func() { _ = mgr.Close(context.Background()) })
 	return mgr, repoDir, counter
 }
@@ -102,7 +108,7 @@ func TestManagerColdStartsOneDaemonForConcurrentCallers(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			clients[i], errs[i] = mgr.ClientSession(context.Background(), "repo", repoDir, model.LanguageGo)
+			clients[i], errs[i] = mgr.ClientSession(context.Background(), "repo", repoDir, utils.LanguageGo)
 		}(i)
 	}
 	wg.Wait()
@@ -120,7 +126,7 @@ func TestManagerColdStartsOneDaemonForConcurrentCallers(t *testing.T) {
 	}
 
 	// A later request must reuse the warm session rather than pay the cold start.
-	again, err := mgr.ClientSession(context.Background(), "repo", repoDir, model.LanguageGo)
+	again, err := mgr.ClientSession(context.Background(), "repo", repoDir, utils.LanguageGo)
 	if err != nil {
 		t.Fatalf("warm call: %v", err)
 	}
@@ -135,7 +141,7 @@ func TestManagerColdStartsOneDaemonForConcurrentCallers(t *testing.T) {
 func TestManagerRespawnsAfterTheDaemonDies(t *testing.T) {
 	mgr, repoDir, counter := fakeDaemonManager(t)
 
-	first, err := mgr.ClientSession(context.Background(), "repo", repoDir, model.LanguageGo)
+	first, err := mgr.ClientSession(context.Background(), "repo", repoDir, utils.LanguageGo)
 	if err != nil {
 		t.Fatalf("cold start: %v", err)
 	}
@@ -143,7 +149,7 @@ func TestManagerRespawnsAfterTheDaemonDies(t *testing.T) {
 		t.Fatalf("shutdown: %v", err)
 	}
 
-	second, err := mgr.ClientSession(context.Background(), "repo", repoDir, model.LanguageGo)
+	second, err := mgr.ClientSession(context.Background(), "repo", repoDir, utils.LanguageGo)
 	if err != nil {
 		t.Fatalf("respawn: %v", err)
 	}
@@ -164,7 +170,7 @@ func TestManagerRefusesToSpawnAfterClose(t *testing.T) {
 	if err := mgr.Close(context.Background()); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	if _, err := mgr.ClientSession(context.Background(), "repo", repoDir, model.LanguageGo); err != ErrClosed {
+	if _, err := mgr.ClientSession(context.Background(), "repo", repoDir, utils.LanguageGo); err != ErrClosed {
 		t.Fatalf("client after close = %v, want ErrClosed", err)
 	}
 	if got := starts(t, counter); got != 0 {
@@ -175,7 +181,7 @@ func TestManagerRefusesToSpawnAfterClose(t *testing.T) {
 func TestManagerClosesEverySessionOnce(t *testing.T) {
 	mgr, repoDir, _ := fakeDaemonManager(t)
 
-	client, err := mgr.ClientSession(context.Background(), "repo", repoDir, model.LanguageGo)
+	client, err := mgr.ClientSession(context.Background(), "repo", repoDir, utils.LanguageGo)
 	if err != nil {
 		t.Fatalf("cold start: %v", err)
 	}

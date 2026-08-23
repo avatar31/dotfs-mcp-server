@@ -13,7 +13,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/avatar31/dotfs-mcp-server/internal/model"
+	"github.com/avatar31/dotfs-mcp-server/internal/ast"
+	"github.com/avatar31/dotfs-mcp-server/internal/utils"
 )
 
 // Symbol is one extracted declaration: a function, macro, struct, interface,
@@ -25,7 +26,7 @@ type Symbol struct {
 	// method so both plain and receiver-qualified stack-trace symbols resolve.
 	Aliases []string
 	// Type is the closed-enumeration declaration kind.
-	Type model.SymbolType
+	Type ast.SymbolType
 	// ParentScope names the enclosing declaration: the receiver type of a Go
 	// method, the enum owning a C enumerator, or the const block of a Go
 	// constant. Empty for file-level declarations.
@@ -38,7 +39,7 @@ type Symbol struct {
 	// SourceCode is the exact byte scope of the declaration.
 	SourceCode string
 	// Language classifies the extraction engine that produced this record.
-	Language model.Language
+	Language utils.Language
 	// StartByte / EndByte are the isolated byte offsets inside the source file.
 	StartByte int
 	EndByte   int
@@ -50,7 +51,7 @@ type Symbol struct {
 // Engine is a language-specific structural extractor.
 type Engine interface {
 	// Language returns the classification tag written to the cache.
-	Language() model.Language
+	Language() utils.Language
 	// Extensions lists the lowercase file extensions handled by the engine.
 	Extensions() []string
 	// Parse extracts every top-level declaration from src.

@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/avatar31/dotfs-mcp-server/internal/indexer"
+	"github.com/avatar31/dotfs-mcp-server/internal/ast/indexer"
 	"github.com/avatar31/dotfs-mcp-server/internal/utils"
 )
 

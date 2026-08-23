@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/avatar31/dotfs-mcp-server/internal/config"
 )
 
 // terminationGrace is the window a daemon gets between SIGTERM and SIGKILL.
@@ -62,12 +64,12 @@ func newClient(name string, stdin io.WriteCloser, stdout io.Reader, cmd *exec.Cm
 
 // Initialize performs the LSP handshake with a cold daemon. It is called once per
 // daemon and must complete before the first request is sent.
-func (c *Client) Initialize(ctx context.Context, cfg *Config, repoDir string) error {
+func (c *Client) Initialize(ctx context.Context, cfg *config.Config, repoDir string) error {
 	params := InitializeParams{
 		ProcessID: int64(os.Getpid()),
 		ClientInfo: ClientInfo{
-			Name:    cfg.ClientName,
-			Version: cfg.ClientVersion,
+			Name:    cfg.ServerName,
+			Version: cfg.ServerVersion,
 		},
 		RootPath: repoDir,
 		RootURI:  PathToURI(repoDir),
