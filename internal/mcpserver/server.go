@@ -611,12 +611,6 @@ func (d Deps) xrefError(tool string, pos xref.Position, err error) *mcp.CallTool
 			"Repository %q contains no go.mod, so gopls has no module to load. "+
 				"Fall back to lookup_symbol for the static declaration.", pos.Repo))
 
-	case errors.Is(err, lsp.ErrServerUnavailable):
-		return mcp.NewToolResultErrorFromErr(
-			"The required language server is not installed on this host (install gopls or clangd, or set "+
-				"DOTFS_GOPLS_PATH / DOTFS_CLANGD_PATH). Cross-reference tools are unavailable; "+
-				"lookup_symbol and global_codebase_search still work", err)
-
 	case errors.Is(err, utils.ErrUnsupportedLanguage):
 		return mcp.NewToolResultErrorFromErr(
 			"No language server handles this file type. Only .go, .c/.h and C++ sources are supported; "+

@@ -1,0 +1,11 @@
+# Ignore Samba & Ganesha heavy build/test folders
+bin/
+third_party/
+selftest/
+testprogs/
+tests/
+autogen/
+.git/
+.github/
+build/
+config_samples/

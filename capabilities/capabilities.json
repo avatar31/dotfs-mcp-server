@@ -1,0 +1,88 @@
+[
+  {
+    "repo": "dotfs",
+    "language": "Go 1.26.3 (net/http, reedsolomon)",
+    "summary": "A high-performance virtual filesystem (VFS) module that exposes a distributed, erasure-coded object store as a POSIX-compliant filesystem — accessible over NFS, S3, and SMB protocols.",
+    "features": [
+      "Expose a distributed, erasure-coded object store as a POSIX-compliant filesystem",
+      "Support for NFS, S3, and SMB protocols",
+      "Provide VFS layer for multi-protocol access to the underlying storage system",
+      "Create a distributed metadata db instace and expose via vfs",
+      "Write files as chunks to the underlying storage with erasure coding",
+      "Store and retrieve files with erasure coding for fault tolerance and data durability"
+    ],
+    "interfaces": [
+      "Programmatic: Go API for VFS operations",
+      "UDS: Socket interface for NFS and SMB protocols"
+    ],
+    "criticality": "tier-1"
+  },
+  {
+    "repo": "nfs-ganesha",
+    "language": "C11 (NFS, RPC, FSAL)",
+    "summary": "A high-performance a user-space NFS (Network File System) server supporting protocols like NFSv3, NFSv4 etc. It is designed to provide a flexible and extensible framework for serving files over the network, with support for various backends and storage systems.",
+    "features": [
+      "Support for NFSv3, NFSv4, and other NFS protocols",
+      "User-space implementation for flexibility and extensibility",
+      "POSIX-compliant file system access",
+      "Support dotfs via FSAL_DOTFS (File System Abstraction Layer)",
+      "Communicate with dotfs using sockets"
+    ],
+    "interfaces": [
+      "TCP/IP: NFS protocol for file sharing over the network"
+    ],
+    "criticality": "tier-1"
+  },
+  {
+    "repo": "samba",
+    "language": "C (SMB/CIFS, Samba, VFS)",
+    "summary": "A high-performance SMB/CIFS server implementation that allows file and printer sharing over the network. It is part of the Samba suite and provides support for various SMB protocols, enabling interoperability with Windows clients.",
+    "features": [
+      "Support for SMB1, SMB2, and SMB3 protocols",
+      "File and printer sharing over the network",
+      "User authentication and access control",
+      "Support for various file system features like ACLs, extended attributes",
+      "Integration with dotfs for backend storage via vfs_dotfs",
+      "Communicate with dotfs using sockets"
+    ],
+    "interfaces": [
+      "TCP/IP: SMB/CIFS protocol for file and printer sharing"
+    ],
+    "criticality": "tier-1"
+  },
+  {
+    "repo": "halmidi",
+    "language": "Go 1.26.3 (net/http, S3)",
+    "summary": "Halmidi is a high-performance, unified Software-Defined Storage (SDS) platform for enterprise unstructured data. It bridges cloud-native object semantics (AWS S3 API) with traditional low-latency POSIX enterprise protocols (NFSv3/v4 via NFS-Ganesha and SMB2/v3 via Samba) over a single shared storage engine without dual-writes, periodic re-indexing, or semantic synchronization gaps",
+    "features": [
+      "Expose a distributed, erasure-coded object store as a POSIX-compliant filesystem",
+      "Support for NFS, S3, and SMB protocols",
+      "Control plane for managing storage policies, access control, and monitoring",
+      "Provide a unified SDS platform for enterprise unstructured data",
+      "Bridge cloud-native object semantics with traditional low-latency POSIX enterprise protocols"
+    ],
+    "interfaces": [
+      "CLI: hlamidictl",
+      "SOAP: RESTful API for AWS S3-compatible object storage",
+      "HTTP: RESTful API for management and monitoring"
+    ],
+    "criticality": "tier-1"
+  },
+  {
+    "repo": "omashu",
+    "language": "Go 1.26.3 (BadgerDB, etcd/raft)",
+    "summary": "Omashu is a high-performance, distributed metadata database that provides a consistent and fault-tolerant key-value store for managing metadata in a distributed storage system. It is designed to work with dotfs and other storage backends, providing a reliable and scalable solution for metadata management using the Raft consensus algorithm.",
+    "features": [
+      "Distributed key-value store for metadata management",
+      "Multi-node deployment with Raft consensus for fault tolerance",
+      "Distributed Transactions for atomic operations on metadata",
+      "TSO (Timestamp Oracle) for generating globally unique timestamps",
+      "etcd/raft for consensus and leader election",
+      "BadgerDB for efficient storage and retrieval of metadata"
+    ],
+    "interfaces": [
+      "Programmatic: Go API for metadata operations"
+    ],
+    "criticality": "tier-1"
+  }
+]

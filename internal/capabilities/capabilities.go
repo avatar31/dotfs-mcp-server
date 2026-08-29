@@ -18,7 +18,6 @@ type Profile struct {
 	Summary     string   `json:"summary"`
 	Features    []string `json:"features,omitempty"`
 	Interfaces  []string `json:"interfaces,omitempty"`
-	Owners      []string `json:"owners,omitempty"`
 	Criticality string   `json:"criticality,omitempty"`
 }
 
@@ -116,9 +115,6 @@ func (m *Matrix) Describe(repo string, obs Observation) string {
 		}
 		if profile.Criticality != "" {
 			fmt.Fprintf(&b, "\nOperational criticality: %s\n", profile.Criticality)
-		}
-		if len(profile.Owners) > 0 {
-			fmt.Fprintf(&b, "Owning team(s): %s\n", strings.Join(profile.Owners, ", "))
 		}
 	} else {
 		b.WriteString("\n## Business responsibility\n")

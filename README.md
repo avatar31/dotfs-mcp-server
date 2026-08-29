@@ -1,145 +1,70 @@
 # dotfs-mcp-server
 
 A Model Context Protocol (MCP) server that gives an LLM client surgical,
-structural access to a multi-repository workspace of **C** and **Go**
+structural access and compiler-grade view to a multi-repository workspace of **C** and **Go**
 microservices — without shell access and without shipping whole files into the
 context window.
 
-Source is parsed locally into ASTs (Tree-sitter for C, `go/parser` for Go),
-reduced to a complete **symbol table** — functions, methods, structs, unions,
-interfaces, enums, typedefs, type aliases, macros and constants — and cached in
-an embedded BadgerDB key-value store for microsecond lookups. A concurrent REST API lets operators
-and CI webhooks re-index a single repository on demand.
+It replaces "grep and hope" with two complementary engines:
+
+| Engine | Question it answers | Cost | Backed by |
+| --- | --- | --- | --- |
+| **Static index** (Phase 1–2) | *Where is `X` declared? What does it look like?* | sub-millisecond | Tree-sitter → BadgerDB |
+| **Cross-reference engine** (Phase 3) | *Who calls `X`? What implements `X`?* | one LSP round trip | `gopls` / `clangd` |
+
+Everything runs on the developer's machine. No source code, no file path outside the
+workspace and no telemetry ever leaves the host.
 
 ---
 
 ## 1. Architecture
 
-| Component | Package | Responsibility |
-|---|---|---|
-| MCP bridge (stdio) | `internal/mcpserver` | Exposes six read-only tools (see §5) to the LLM |
-| Management REST API | `internal/httpapi` | `POST /api/v1/{repo_name}/update` + mutex-guarded job tracking (HTTP 409 on contention) |
-| Dual AST parser layer | `internal/parser` | `.go` → `go/token`, `go/parser`, `go/ast`; `.c` / `.h` → Tree-sitter C grammar |
-| Filter-Then-Parse indexer | `internal/indexer` | Phase 1 `bytes.Contains` scan → Phase 2 extension-routed AST extraction |
-| Cache | `internal/store` | Embedded BadgerDB (LSM) at `./agent_knowledge`, typed symbol namespace + three secondary indexes |
-| Capability matrix | `internal/capabilities` | Curated repo profiles merged with observed cache facts |
+### The three phases
 
-```
-LLM client ──stdio(JSON-RPC)──► MCP tools ──► BadgerDB cache ◄── indexer ◄── workspace/*
-operator/CI ──HTTP POST────────► job tracker ──► background worker ──┘
-```
+```mermaid
+flowchart TB
+    subgraph Client["MCP client (Claude / Cursor / agent)"]
+        A[tool call over stdio]
+    end
 
-### Symbol taxonomy
+    A --> S[internal/mcpserver<br/>10 tools, argument validation]
 
-Every record carries one `symbol_type` drawn from a closed enumeration:
+    S -->|"static: lookup_symbol,<br/>global_codebase_search,<br/>read_code_snippet, ..."| IDX
+    S -->|"relational: find_references,<br/>get_call_hierarchy, ..."| XR
 
-| `symbol_type` | C source | Go source |
-|---|---|---|
-| `function` | `function_definition`, prototypes in headers | `func Name(...)` |
-| `method` | — | `func (r Recv) Name(...)` |
-| `struct` | `struct` **and** `union` specifiers | `type T struct{...}` |
-| `interface` | — | `type T interface{...}` |
-| `enum` | `enum` specifiers | — |
-| `typedef` | `type_definition` | `type T Underlying` |
-| `type_alias` | — | `type T = Underlying` |
-| `macro` | `#define NAME value` | — |
-| `macro_function` | `#define NAME(a, b) ...` | — |
-| `constant` | enumerators | `const` specs and exported package-level `var`s |
+    subgraph P12["Phase 1 + 2 — always-on static index"]
+        IDX[internal/indexer<br/>walk + prune + live fallback]
+        PAR[internal/parser<br/>Tree-sitter C and Go]
+        ST[(internal/store<br/>BadgerDB)]
+        IDX --> PAR --> ST
+        IDX --> ST
+    end
 
-Two deliberate mapping decisions, made because the enumeration above is closed:
+    subgraph P3["Phase 3 — on-demand semantic engine"]
+        XR[internal/xref<br/>resolve + compact + dedupe]
+        MGR[internal/lsp Manager<br/>one daemon per repo+language]
+        CL[internal/lsp Client<br/>JSON-RPC over stdio]
+        XR --> MGR --> CL
+    end
 
-* A C `union` is stored as `struct` with the signature `union <name>`, so a
-  client asking for "the definition of this type" gets it without needing to
-  know which specifier the author used.
-* A Go package-level `var` is stored as `constant` with a `var ...` signature.
-  Only **exported** vars are indexed; unexported package state is noise for an
-  API-oriented consumer.
+    CL -->|"stdio"| GOPLS[gopls]
+    CL -->|"stdio"| CLANGD[clangd]
 
-### Cache schema
-
-| Key | Value |
-|---|---|
-| `sym:<repo>:<file>:<type>:<name>:<offset>` | JSON `SymbolRecord` (the primary record) |
-| `idx:name:<name>:<repo>:<file>:<offset>` | the primary key |
-| `idx:type:<type>:<name>:<repo>:<file>:<offset>` | the primary key |
-| `idx:file:<repo>:<file>:<offset>` | the primary key |
-
-`<offset>` is `start_byte` rendered as a zero-padded 8-digit decimal so that
-BadgerDB's lexicographic iteration returns symbols in source order. Any `:`
-inside a component is escaped as `%3A`, so a key can never be ambiguous.
-
-> **Design note.** The index values hold the primary key rather than being
-> empty. It costs a few dozen bytes per symbol and removes an entire class of
-> key-reconstruction bugs: a prefix scan reads the pointer and follows it, so
-> the index and the record can never disagree about escaping or padding.
-
-```json
-{
-  "repo_name": "packet-router-c",
-  "file_path": "router.h",
-  "language": "c",
-  "symbol_type": "struct",
-  "name": "router_ops",
-  "parent_scope": "",
-  "start_byte": 812,
-  "end_byte": 1041,
-  "start_line": 34,
-  "end_line": 40,
-  "documentation": "router_ops is the transport v-table...",
-  "signature": "struct router_ops",
-  "source_code": "struct router_ops {\n    int (*open)(...);\n};"
-}
+    HTTP[internal/httpapi<br/>re-index REST API] --> IDX
 ```
 
-`language` is always `"c"` or `"go"`, so the client can pick the right markdown
-fence and linting rules. `file_path` is **repository-relative** (`router.h`, not
-`/srv/workspace/packet-router-c/router.h`) — absolute host paths are never
-leaked to the model, and the value can be handed straight back to
-`read_code_snippet`.
+### Query routing
 
-`aliases` lets one record answer to several names: Go methods are indexed under
-both `Issue` and `Issuer.Issue`, so a symbol taken straight from a stack trace
-resolves.
+The agent is expected to walk down this ladder; the tool descriptions push it in the same
+direction:
 
-`parent_scope` carries the owning declaration for nested symbols — an enumerator
-records its enum (or, for the anonymous `typedef enum { ... } name_t` idiom, the
-typedef name), and a Go method records its receiver type.
+1. **`lookup_symbol` / `global_codebase_search`** — name → declaration. Answered from
+   BadgerDB in microseconds. This is where 80 % of questions should end.
+2. **`read_code_snippet`** — verify surrounding context, at most 200 lines per call.
+3. **Relational tools** — only once a concrete `file:line:character` is known, because
+   LSP is position-based. A cold daemon costs seconds; a warm one costs milliseconds.
 
-For grouped declarations (a Go `const (...)` block, a C `enum`), `source_code`
-is the **whole block** — an LLM reasoning about `iota` or implicit enumerator
-values needs its siblings — while `start_byte`/`start_line` point at the
-individual member so `read_code_snippet` can still zoom in.
-
----
-
-## 2. Prerequisites
-
-* Go **1.24+** (module targets `go 1.26.3`)
-* A C toolchain (`gcc`/`clang`) — **cgo is mandatory**, the C engine links the
-  Tree-sitter grammar
-* Linux or macOS
-
-```bash
-go version && gcc --version
-```
-
----
-
-## 3. Build
-
-```bash
-git clone <this-repo> && cd dotfs-mcp-server
-make build          # -> bin/dotfs-mcp-server
-```
-
-Other targets: `make test`, `make race`, `make vet`, `make fmt`, `make clean`.
-
-> Cross-compiling requires a cross C toolchain; `CGO_ENABLED=0` builds will not
-> compile.
-
----
-
-## 4. Configure
+## 2. Configure
 
 ### Step 1 — lay out the workspace
 
@@ -147,18 +72,11 @@ Other targets: `make test`, `make race`, `make vet`, `make fmt`, `make clean`.
 sub-directories are the repositories. The directory name becomes `repo_name`.
 
 ```
-/srv/workspace/
-├── auth-service-go/      # repo_name = auth-service-go
+.../dotfs-workspace/
+├── dotfs/      # repo_name = dotfs
 │   └── ...*.go
-└── packet-router-c/      # repo_name = packet-router-c
+└── samba/      # repo_name = samba
     └── ...*.c, *.h
-```
-
-A ready-made sample lives in `testdata/workspace/`:
-
-```bash
-mkdir -p /srv/workspace
-cp -r testdata/workspace/* /srv/workspace/
 ```
 
 ### Step 2 — set the environment
@@ -170,44 +88,22 @@ cp -r testdata/workspace/* /srv/workspace/
 | `DOTFS_HTTP_ADDR` | `127.0.0.1:8080` | Management API listen address |
 | `DOTFS_HTTP_ENABLED` | `true` | Set `false` to run stdio-only |
 | `DOTFS_API_TOKEN` | *(empty)* | When set, requires `Authorization: Bearer <token>` |
-| `DOTFS_CAPABILITIES_FILE` | *(empty)* | JSON repository capability matrix |
 | `DOTFS_INDEX_ON_START` | `true` | Index the whole workspace at boot (async) |
 | `DOTFS_MAX_FILE_SIZE` | `2097152` | Skip source files larger than this (bytes) |
 | `DOTFS_SKIP_DIRS` | `.git,node_modules,vendor,...` | Comma-separated directory names to prune |
 | `DOTFS_GC_INTERVAL` | `10m` | BadgerDB value-log GC cadence |
 | `DOTFS_LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` |
 | `DOTFS_SERVER_NAME` / `DOTFS_SERVER_VERSION` | `dotfs-mcp-server` / `1.0.0` | Advertised during the MCP handshake |
+| `DOTFS_LSP_ENABLED` | `true` | Enable the relational engine (gopls/clangd) |
+| `DOTFS_LSP_TIMEOUT` | `5s` | Maximum time to wait for a warm LSP response |
+| `DOTFS_LSP_INIT_TIMEOUT` | `45s` | Maximum time to wait for a cold LSP response |
+| `DOTFS_GOPLS_PATH` | `gopls` | Path to the Go language server |
+| `DOTFS_CLANGD_PATH` | `clangd` | Path to the C/C++ language server |
+| `DOTFS_CLANGD_ARGS` | None | Extra arguments to clangd |
 
 All logs go to **stderr**; stdout is reserved for the MCP JSON-RPC framing.
 
-### Step 3 — describe your services (optional but recommended)
-
-`list_repo_capabilities` merges a curated profile with cache-derived facts.
-Copy the template and edit it:
-
-```bash
-cp configs/capabilities.example.json configs/capabilities.json
-export DOTFS_CAPABILITIES_FILE=$PWD/configs/capabilities.json
-```
-
-```json
-[
-  {
-    "repo": "auth-service-go",
-    "language": "Go 1.22 (net/http, HMAC session tokens)",
-    "summary": "Issues and validates opaque session tokens ...",
-    "features": ["Session token issuance and HMAC verification"],
-    "interfaces": ["Binary: 32-byte session header shared with packet-router-c"],
-    "owners": ["identity-platform"],
-    "criticality": "tier-1"
-  }
-]
-```
-
-Repositories without a profile still work — the briefing is then derived purely
-from the indexed cache.
-
-### Step 4 — register the server with your LLM client
+### Step 3 — register the server with your LLM client
 
 **Claude Desktop** (`claude_desktop_config.json`):
 
@@ -219,7 +115,6 @@ from the indexed cache.
       "env": {
         "DOTFS_WORKSPACE_ROOT": "/srv/workspace",
         "DOTFS_CACHE_DB": "/var/lib/dotfs/agent_knowledge",
-        "DOTFS_CAPABILITIES_FILE": "/opt/dotfs/capabilities.json",
         "DOTFS_HTTP_ADDR": "127.0.0.1:8080",
         "DOTFS_API_TOKEN": "change-me"
       }
@@ -309,6 +204,25 @@ Returns a markdown briefing: language stack, business responsibility,
 implemented features, integration interfaces and the observed structural
 footprint — symbol count, declaration mix by kind, and representative entry
 points.
+
+### `find_references(repo_name, file_path, line, character, include_declaration)`
+
+Returns a list of all call sites and references to the symbol at the given
+position. `include_declaration` controls whether the declaration itself is
+returned in the list.
+
+### `get_call_hierarchy(repo_name, file_path, line, character, direction)`
+
+Returns a tree of all callers or callees of the symbol at the given position.
+
+### `find_interface_implementations(repo_name, file_path, line, character)`
+
+Returns a list of all concrete types that implement the interface at the given
+position.
+
+### `get_type_hierarchy(repo_name, file_path, line, character, direction)`
+
+Returns a tree of all subtypes or supertypes of the type at the given position.
 
 ---
 

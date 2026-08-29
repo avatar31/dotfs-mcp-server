@@ -1,0 +1,15 @@
+{
+  "parser": {
+    "code_only": true,
+    "target_languages": ["c", "cpp", "h", "go"],
+    "exclude_extensions": [".md", ".txt", ".pdf", ".png", ".jpg", ".html", ".pdf", ".doc", ".docx"]
+  },
+  "extraction": {
+    "max_file_size_kb": 1024,
+    "include_hidden_files": false
+  },
+  "graph": {
+    "enable_semantic_extraction": false,
+    "group_by_repository": true
+  }
+}

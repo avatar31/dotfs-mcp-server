@@ -8,9 +8,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
@@ -38,6 +40,11 @@ func main() {
 
 func run() error {
 	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+
+	err = preconfig(cfg)
 	if err != nil {
 		return err
 	}
@@ -77,7 +84,7 @@ func run() error {
 		return err
 	}
 
-	matrix, err := capabilities.Load(cfg.CapabilitiesFile)
+	matrix, err := capabilities.Load("./capabilities/capabilities.json")
 	if err != nil {
 		return err
 	}
@@ -113,7 +120,7 @@ func run() error {
 
 	// The language-server pool is created eagerly but spawns nothing
 	// until a relational tool is actually called.
-	crossRef, closeLSP, err := startCrossReference(&cfg, logger)
+	crossRef, closeLSP, err := startCrossReference(cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -167,6 +174,67 @@ func run() error {
 	return runErr
 }
 
+func preconfig(cfg *config.Config) error {
+	info, err := os.Stat(fmt.Sprintf("%s/graphify-out", cfg.WorkspaceRoot))
+	if err != nil {
+		fmt.Printf("workspace root %q is not a valid graphify workspace: Generate graphify GRAPH_REPORT.md skill."+
+			" Check prereq/graphify/README.md for more instructions", cfg.WorkspaceRoot)
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("workspace root %q is not a valid graphify workspace", cfg.WorkspaceRoot)
+	}
+
+	if cfg.LSPConfig.Enabled {
+		_, err := exec.LookPath(cfg.LSPConfig.ClangdPath)
+		if err != nil {
+			return err
+		}
+
+		// Run `cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -S src/ -B build/` in nfs-ganesha dir
+		_, err = os.Stat(fmt.Sprintf("%s/nfs-ganesha/build/compile_commands.json", cfg.WorkspaceRoot))
+		if err != nil {
+			return err
+		}
+
+		// _, err = os.Stat(fmt.Sprintf("%s/samba/build/compile_commands.json", cfg.WorkspaceRoot))
+		// if err != nil {
+		// 	return err
+		// }
+
+		_, err = exec.LookPath(cfg.LSPConfig.GoplsPath)
+		if err != nil {
+			return err
+		}
+	}
+
+	err = cp("./prereqs/knowledge/dotfs_agent.md", fmt.Sprintf("%s/AGENT.md", cfg.WorkspaceRoot))
+	if err != nil {
+		return err
+	}
+
+	err = cp("./prereqs/knowledge/dotfs.workspace.md", fmt.Sprintf("%s/WORKSPACE.md", cfg.WorkspaceRoot))
+	if err != nil {
+		return err
+	}
+
+	copilotInstructions := `# Copilot Instructions
+> **See also:** [AGENTS.md](../AGENTS.md) for more information on how to use the dotfs agent.
+`
+
+	err = createDirIfNotExists(fmt.Sprintf("%s/.github", cfg.WorkspaceRoot))
+	if err != nil {
+		return err
+	}
+
+	err = os.WriteFile(fmt.Sprintf("%s/.github/copilot-instructions.md", cfg.WorkspaceRoot), []byte(copilotInstructions), 0644)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func startCrossReference(cfg *config.Config, logger *slog.Logger) (mcpserver.CrossReference, func(), error) {
 	if !cfg.LSPConfig.Enabled {
 		logger.Info("cross-reference engine disabled", "reason", "DOTFS_LSP_ENABLED=false")
@@ -174,7 +242,6 @@ func startCrossReference(cfg *config.Config, logger *slog.Logger) (mcpserver.Cro
 	}
 
 	manager := lsp.NewManager(cfg, logger.With("component", "lsp"))
-
 	service, err := xref.New(xref.FromManager(manager), cfg.WorkspaceRoot, logger.With("component", "xref"))
 	if err != nil {
 		return nil, nil, err
@@ -233,4 +300,32 @@ func newLogger(level string) *slog.Logger {
 		lvl = slog.LevelInfo
 	}
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
+}
+
+func cp(src, dst string) error {
+	source, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+
+	destination, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destination.Close()
+
+	if _, err := io.Copy(destination, source); err != nil {
+		return err
+	}
+	return destination.Sync()
+}
+
+func createDirIfNotExists(path string) error {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		if err := os.MkdirAll(path, 0755); err != nil {
+			return fmt.Errorf("failed to create directory %s: %w", path, err)
+		}
+	}
+	return nil
 }

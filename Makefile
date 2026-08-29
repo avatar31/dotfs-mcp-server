@@ -9,7 +9,7 @@ export CGO_ENABLED := 1
 
 all: fmt vet test build
 
-build:
+build_binary:
 	@mkdir -p $(BIN_DIR)
 	go build -trimpath -ldflags "-s -w" -o $(BIN_DIR)/$(BINARY) $(PKG)
 
@@ -28,7 +28,7 @@ fmt:
 tidy:
 	go mod tidy
 
-run: build
+run: build_binary
 	./$(BIN_DIR)/$(BINARY)
 
 clean:

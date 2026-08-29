@@ -27,7 +27,6 @@ workspace and no telemetry ever leaves the host.
 8. [Management HTTP API](#management-http-api)
 9. [Development guide](#development-guide)
 10. [Design notes and deliberate deviations](#design-notes-and-deliberate-deviations)
-11. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -181,30 +180,30 @@ asks a relational question.
 ```
 cmd/main.go                  wiring: config → store → indexer → lsp → xref → mcp + http
 internal/
-  model/                     SymbolRecord, the closed SymbolType enum, validation
-  parser/                    Tree-sitter extraction
-    parser.go                language dispatch, file size guard
-    golang.go                Go: func, method, struct, interface, const, var, type alias
-    clang.go                 C: function, struct, union, enum, typedef, #define
-  store/                     BadgerDB persistence, key schema, prefix scans, pruning
-  indexer/
-    indexer.go               walk, incremental prune, live fallback search, snippets
-    paths.go                 repo-name validation and traversal-safe path joining
+  ast/                       Phase 1–2 Tree-sitter queries and extraction helpers
+    indexer/
+      indexer.go             walk, incremental prune, live fallback search, snippets
+      paths.go               repo-name validation and traversal-safe path joining
+    parser/                  Tree-sitter extraction
+      parser.go              language dispatch, file size guard
+      golang.go              Go: func, method, struct, interface, const, var, type alias
+      clang.go               C: function, struct, union, enum, typedef, #define
+    store/                    BadgerDB persistence, key schema, prefix scans, pruning
   capabilities/              curated repository capability matrix (JSON)
   httpapi/                   management REST API + single-flight job registry
-  mcpserver/
-    server.go                the six static tools
-    xref_tools.go            the four relational tools + the error/fallback matrix
   lsp/                       Phase 3 transport
-    protocol.go              LSP types, URI ↔ path conversion
-    jsonrpc.go               Content-Length framing, request/response multiplexing
     client.go                one daemon: supervise, dispatch, cancel, shutdown
     manager.go               daemon pool, prerequisite checks, single-flight cold start
-    process_{unix,windows}.go  process-group isolation and tree termination
+    protocol.go              LSP types, URI ↔ path conversion
+    stdio.go                 standard input/output loop for MCP JSON-RPC
+  mcpserver/
+    server.go                all 10 tools, argument validation, error mapping
+  utils/                     Shared helpers, constant definitions, error types
   xref/                      Phase 3 semantics
     service.go               position → session → LSP call → result
     compact.go               dedupe, snippet extraction, path elision
     types.go                 the wire shapes returned to the model
+prereqs/                     Static instructions and knowledge files
 testdata/workspace/          two fixture repositories used by every test
 ```
 
@@ -409,7 +408,6 @@ or a container.
 | `DOTFS_MAX_FILE_SIZE` | `2097152` (2 MiB) | skip source files larger than this |
 | `DOTFS_SKIP_DIRS` | `.git,.svn,.hg,node_modules,vendor,third_party,build,dist,out,.idea,.vscode` | pruned during the walk |
 | `DOTFS_GC_INTERVAL` | `10m` | BadgerDB value-log GC cadence |
-| `DOTFS_CAPABILITIES_FILE` | *(unset)* | JSON repository capability matrix |
 | `DOTFS_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` (always to stderr) |
 | `DOTFS_SERVER_NAME` / `DOTFS_SERVER_VERSION` | `dotfs-mcp-server` / `1.0.0` | announced in the MCP handshake |
 
@@ -541,19 +539,5 @@ Documented on purpose, so a reviewer does not mistake them for bugs.
    reader, and the duplicate would only burn tokens.
 9. **A URI without an explicit `file:` scheme is discarded.** Virtual documents and malformed
    URIs must never be turned into a filesystem path.
-
----
-
-## Troubleshooting
-
-| Symptom | Cause | Fix |
-| --- | --- | --- |
-| `tools/list` returns 6 tools | `DOTFS_LSP_ENABLED=false`, or the engine failed to construct | check stderr at boot |
-| *"The required language server is not installed"* | `gopls`/`clangd` not on the `PATH` seen by the server | set `DOTFS_GOPLS_PATH` / `DOTFS_CLANGD_PATH`, or fix `PATH` in the MCP client config |
-| *"no compile_commands.json"* | C repository without a compilation database | `cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON` or `bear -- make` |
-| Relational calls time out on the first try, work afterwards | cold start exceeded the request deadline | raise `DOTFS_LSP_INIT_TIMEOUT`, retry once |
-| `cgo: C compiler not found` | building with `CGO_ENABLED=0` | install gcc/clang and use `make build` |
-| The client hangs at startup | something wrote to stdout | logs must go to stderr only |
-| Stale symbols after a `git pull` | index not refreshed | `POST /api/v1/{repo}/update`, or restart with `DOTFS_INDEX_ON_START=true` |
 
 ---

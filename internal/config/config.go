@@ -58,8 +58,6 @@ type Config struct {
 	// APIToken, when non-empty, is required as "Authorization: Bearer <token>"
 	// on every management API call.
 	APIToken string
-	// CapabilitiesFile optionally points at a JSON repository capability matrix.
-	CapabilitiesFile string
 	// MaxFileSize caps the size of a single source file that will be parsed.
 	MaxFileSize int64
 	// IndexOnStart triggers a full workspace index during boot.
@@ -80,13 +78,12 @@ type Config struct {
 }
 
 // Load reads the environment, applies defaults and validates the result.
-func Load() (Config, error) {
+func Load() (*Config, error) {
 	cfg := Config{
 		WorkspaceRoot:    envString("DOTFS_WORKSPACE_ROOT", DefaultWorkspaceRoot),
 		CacheDir:         envString("DOTFS_CACHE_DB", DefaultCacheDir),
 		HTTPAddr:         envString("DOTFS_HTTP_ADDR", DefaultHTTPAddr),
 		APIToken:         os.Getenv("DOTFS_API_TOKEN"),
-		CapabilitiesFile: os.Getenv("DOTFS_CAPABILITIES_FILE"),
 		LogLevel:         envString("DOTFS_LOG_LEVEL", "info"),
 		ServerName:       envString("DOTFS_SERVER_NAME", DefaultServerName),
 		ServerVersion:    envString("DOTFS_SERVER_VERSION", DefaultServerVersion),
@@ -100,34 +97,34 @@ func Load() (Config, error) {
 
 	var err error
 	if cfg.MaxFileSize, err = envInt64("DOTFS_MAX_FILE_SIZE", DefaultMaxFileSize); err != nil {
-		return Config{}, err
+		return nil, err
 	}
 	if cfg.IndexOnStart, err = envBool("DOTFS_INDEX_ON_START", true); err != nil {
-		return Config{}, err
+		return nil, err
 	}
 	if cfg.EnableHTTP, err = envBool("DOTFS_HTTP_ENABLED", true); err != nil {
-		return Config{}, err
+		return nil, err
 	}
 	if cfg.GCInterval, err = envDuration("DOTFS_GC_INTERVAL", 10*time.Minute); err != nil {
-		return Config{}, err
+		return nil, err
 	}
 	if cfg.LSPConfig.Enabled, err = envBool("DOTFS_LSP_ENABLED", true); err != nil {
-		return Config{}, err
+		return nil, err
 	}
 	if cfg.LSPConfig.RequestTimeout, err = envDuration("DOTFS_LSP_TIMEOUT", DefaultRequestTimeout); err != nil {
-		return Config{}, err
+		return nil, err
 	}
 	if cfg.LSPConfig.InitTimeout, err = envDuration("DOTFS_LSP_INIT_TIMEOUT", DefaultInitTimeout); err != nil {
-		return Config{}, err
+		return nil, err
 	}
 	if cfg.WorkspaceRoot, err = filepath.Abs(cfg.WorkspaceRoot); err != nil {
-		return Config{}, fmt.Errorf("resolve DOTFS_WORKSPACE_ROOT: %w", err)
+		return nil, fmt.Errorf("resolve DOTFS_WORKSPACE_ROOT: %w", err)
 	}
 	if cfg.CacheDir, err = filepath.Abs(cfg.CacheDir); err != nil {
-		return Config{}, fmt.Errorf("resolve DOTFS_CACHE_DB: %w", err)
+		return nil, fmt.Errorf("resolve DOTFS_CACHE_DB: %w", err)
 	}
 
-	return cfg, cfg.Validate()
+	return &cfg, cfg.Validate()
 }
 
 // Validate reports whether the configuration can be used to boot the server.

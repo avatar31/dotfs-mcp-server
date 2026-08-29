@@ -24,8 +24,6 @@ var (
 	ErrNoCompileCommands = errors.New("lsp: no compile_commands.json was found for this repository")
 	// ErrNoGoModule means gopls has no module to load.
 	ErrNoGoModule = errors.New("lsp: no go.mod was found for this repository")
-	// ErrServerUnavailable means the daemon binary is missing from $PATH.
-	ErrServerUnavailable = errors.New("lsp: language server executable is not available")
 	// ErrClosed is returned once the manager has been shut down.
 	ErrClosed = errors.New("lsp: manager is closed")
 	// ErrDaemonExited is returned to every in-flight call when a daemon dies.
@@ -154,11 +152,7 @@ func (m *Manager) spawn(ctx context.Context, repo, repoDir string, lang utils.La
 		return nil, err
 	}
 
-	resolved, err := exec.LookPath(bin)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %q (%v)", ErrServerUnavailable, bin, err)
-	}
-
+	resolved, _ := exec.LookPath(bin)
 	// The command is intentionally detached from the parent context: a daemon
 	// must outlive the single tool call that happened to start it, and teardown
 	// is handled explicitly by Shutdown.
