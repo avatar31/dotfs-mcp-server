@@ -7,10 +7,9 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
-	"log"
-	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	mcpsrv "github.com/mark3labs/mcp-go/server"
+	"go.uber.org/zap"
 
 	"github.com/avatar31/dotfs-mcp-server/internal/ast/indexer"
 	"github.com/avatar31/dotfs-mcp-server/internal/ast/parser"
@@ -25,36 +25,61 @@ import (
 	"github.com/avatar31/dotfs-mcp-server/internal/capabilities"
 	"github.com/avatar31/dotfs-mcp-server/internal/config"
 	"github.com/avatar31/dotfs-mcp-server/internal/httpapi"
+	"github.com/avatar31/dotfs-mcp-server/internal/logger"
 	"github.com/avatar31/dotfs-mcp-server/internal/lsp"
 	"github.com/avatar31/dotfs-mcp-server/internal/mcpserver"
+	"github.com/avatar31/dotfs-mcp-server/internal/utils"
 	"github.com/avatar31/dotfs-mcp-server/internal/xref"
 )
 
 func main() {
-	if err := run(); err != nil {
+	workspaceDirPtr := flag.String("workspace", "", "Path to the workspace root directory")
+	setupPtr := flag.Bool("setup", false, "Run the initial workspace setup")
+	flag.Parse()
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
+		os.Exit(1)
+	}
+
+	if workspaceDirPtr != nil && *workspaceDirPtr != "" {
+		cfg.WorkspaceRoot = *workspaceDirPtr
+	}
+
+	if cfg.WorkspaceRoot == "" {
+		fmt.Fprintln(os.Stderr, "fatal: workspace root directory must be specified with -workspace")
+		os.Exit(1)
+	}
+
+	if setupPtr != nil && *setupPtr {
+		err := preconfig(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if err := run(cfg); err != nil {
 		// stdout belongs to the MCP transport, so failures go to stderr only.
 		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	cfg, err := config.Load()
+func run(cfg *config.Config) error {
+	log, err := logger.NewZapLogger("dotfs-mcp-server", cfg.LogPath)
 	if err != nil {
 		return err
 	}
+	defer log.Sync()
 
-	err = preconfig(cfg)
-	if err != nil {
-		return err
-	}
-
-	logger := newLogger(cfg.LogLevel)
-	logger.Info("starting dotfs-mcp-server",
-		"version", cfg.ServerVersion,
-		"workspace_root", cfg.WorkspaceRoot,
-		"cache_dir", cfg.CacheDir,
-		"http_enabled", cfg.EnableHTTP,
+	log.Info("dotfs-mcp-server starting",
+		zap.String("version", cfg.ServerVersion),
+		zap.String("workspace_root", cfg.WorkspaceRoot),
+		zap.String("cache_dir", cfg.CacheDir),
+		zap.Bool("http_enabled", cfg.EnableHTTP),
 	)
 
 	// Signal-aware root context shared by the stdio transport, the HTTP API and
@@ -62,20 +87,20 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	cache, err := store.Open(cfg.CacheDir, logger)
+	cache, err := store.Open(cfg.CacheDir, log)
 	if err != nil {
 		return err
 	}
 	defer func() {
 		if cerr := cache.Close(); cerr != nil {
-			logger.Error("failed to close cache", "error", cerr)
+			log.Error("failed to close cache", zap.Error(cerr))
 		}
 	}()
 
 	registry := parser.NewDefaultRegistry()
-	logger.Debug("parser engines registered", "extensions", registry.Extensions())
+	log.Debug("parser engines registered", zap.Strings("extensions", registry.Extensions()))
 
-	idx, err := indexer.New(cache, registry, logger, indexer.Options{
+	idx, err := indexer.New(cache, registry, log, indexer.Options{
 		WorkspaceRoot: cfg.WorkspaceRoot,
 		MaxFileSize:   cfg.MaxFileSize,
 		SkipDirs:      cfg.SkipDirs,
@@ -84,7 +109,7 @@ func run() error {
 		return err
 	}
 
-	matrix, err := capabilities.Load("./capabilities/capabilities.json")
+	matrix, err := capabilities.Load()
 	if err != nil {
 		return err
 	}
@@ -95,14 +120,14 @@ func run() error {
 		go func() {
 			summaries, err := idx.IndexAll(ctx)
 			if err != nil && !errors.Is(err, context.Canceled) {
-				logger.Error("initial workspace index failed", "error", err)
+				log.Error("initial workspace index failed", zap.Error(err))
 				return
 			}
-			logger.Info("initial workspace index complete", "repositories", len(summaries))
+			log.Info("initial workspace index complete", zap.Int("repositories", len(summaries)))
 		}()
 	}
 
-	gcDone := startValueLogGC(ctx, cache, logger, cfg.GCInterval)
+	gcDone := startValueLogGC(ctx, cache, log, cfg.GCInterval)
 
 	var api *httpapi.Server
 	apiErrCh := make(chan error, 1)
@@ -111,7 +136,7 @@ func run() error {
 			Addr:          cfg.HTTPAddr,
 			APIToken:      cfg.APIToken,
 			WorkspaceRoot: cfg.WorkspaceRoot,
-		}, idx, logger.With("component", "httpapi"))
+		}, idx, log.With(zap.String("component", "httpapi")))
 		if err != nil {
 			return err
 		}
@@ -120,7 +145,7 @@ func run() error {
 
 	// The language-server pool is created eagerly but spawns nothing
 	// until a relational tool is actually called.
-	crossRef, closeLSP, err := startCrossReference(cfg, logger)
+	crossRef, closeLSP, err := startCrossReference(cfg, log)
 	if err != nil {
 		return err
 	}
@@ -130,7 +155,7 @@ func run() error {
 		Cache:    cache,
 		Scanner:  idx,
 		Matrix:   matrix,
-		Log:      logger.With("component", "mcp"),
+		Log:      log.With(zap.String("component", "mcp")),
 		Name:     cfg.ServerName,
 		Version:  cfg.ServerVersion,
 		LiveScan: true,
@@ -140,23 +165,32 @@ func run() error {
 		return err
 	}
 
-	stdio := mcpsrv.NewStdioServer(mcpServer)
-	stdio.SetErrorLogger(log.New(os.Stderr, "mcp-stdio ", log.LstdFlags))
+	httpSrv := mcpsrv.NewStreamableHTTPServer(mcpServer)
 
 	serveErrCh := make(chan error, 1)
-	go func() { serveErrCh <- stdio.Listen(ctx, os.Stdin, os.Stdout) }()
+	go func() { serveErrCh <- httpSrv.Start(":9701") }()
 
 	var runErr error
 	select {
 	case <-ctx.Done():
-		logger.Info("shutdown signal received")
+		log.Info("shutdown signal received")
+		deadlineCtx, cancelShutdown := context.WithTimeout(ctx, 5*time.Second)
+		defer cancelShutdown()
+		if err := httpSrv.Shutdown(deadlineCtx); err != nil {
+			log.Error("Failed to shutdown mcp server", zap.Error(err))
+		}
 	case err := <-serveErrCh:
-		if err != nil && !errors.Is(err, context.Canceled) {
-			runErr = fmt.Errorf("mcp stdio transport: %w", err)
+		if err != nil {
+			runErr = err
 		}
 	case err := <-apiErrCh:
 		if err != nil {
 			runErr = err
+			deadlineCtx, cancelShutdown := context.WithTimeout(ctx, 5*time.Second)
+			defer cancelShutdown()
+			if err := httpSrv.Shutdown(deadlineCtx); err != nil {
+				log.Error("Failed to shutdown mcp server", zap.Error(err))
+			}
 		}
 	}
 
@@ -165,12 +199,12 @@ func run() error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := api.Shutdown(shutdownCtx); err != nil {
-			logger.Error("management API shutdown failed", "error", err)
+			log.Error("management API shutdown failed", zap.Error(err))
 		}
 	}
 	<-gcDone
 
-	logger.Info("dotfs-mcp-server stopped")
+	log.Info("dotfs-mcp-server stopped")
 	return runErr
 }
 
@@ -185,27 +219,25 @@ func preconfig(cfg *config.Config) error {
 		return fmt.Errorf("workspace root %q is not a valid graphify workspace", cfg.WorkspaceRoot)
 	}
 
-	if cfg.LSPConfig.Enabled {
-		_, err := exec.LookPath(cfg.LSPConfig.ClangdPath)
-		if err != nil {
-			return err
-		}
+	_, err = exec.LookPath(cfg.LSPConfig.ClangdPath)
+	if err != nil {
+		return err
+	}
 
-		// Run `cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -S src/ -B build/` in nfs-ganesha dir
-		_, err = os.Stat(fmt.Sprintf("%s/nfs-ganesha/build/compile_commands.json", cfg.WorkspaceRoot))
-		if err != nil {
-			return err
-		}
+	// Run `cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -S src/ -B build/` in nfs-ganesha dir
+	_, err = os.Stat(fmt.Sprintf("%s/nfs-ganesha/build/compile_commands.json", cfg.WorkspaceRoot))
+	if err != nil {
+		return err
+	}
 
-		// _, err = os.Stat(fmt.Sprintf("%s/samba/build/compile_commands.json", cfg.WorkspaceRoot))
-		// if err != nil {
-		// 	return err
-		// }
+	// _, err = os.Stat(fmt.Sprintf("%s/samba/build/compile_commands.json", cfg.WorkspaceRoot))
+	// if err != nil {
+	// 	return err
+	// }
 
-		_, err = exec.LookPath(cfg.LSPConfig.GoplsPath)
-		if err != nil {
-			return err
-		}
+	err = initGopls(cfg)
+	if err != nil {
+		return err
 	}
 
 	err = cp("./prereqs/knowledge/dotfs_agent.md", fmt.Sprintf("%s/AGENT.md", cfg.WorkspaceRoot))
@@ -235,20 +267,51 @@ func preconfig(cfg *config.Config) error {
 	return nil
 }
 
-func startCrossReference(cfg *config.Config, logger *slog.Logger) (mcpserver.CrossReference, func(), error) {
-	if !cfg.LSPConfig.Enabled {
-		logger.Info("cross-reference engine disabled", "reason", "DOTFS_LSP_ENABLED=false")
-		return nil, func() {}, nil
+func initGopls(cfg *config.Config) error {
+	_, err := exec.LookPath(cfg.LSPConfig.GoplsPath)
+	if err != nil {
+		return err
 	}
 
-	manager := lsp.NewManager(cfg, logger.With("component", "lsp"))
-	service, err := xref.New(xref.FromManager(manager), cfg.WorkspaceRoot, logger.With("component", "xref"))
+	err = os.Remove(fmt.Sprintf("%s/go.work", cfg.WorkspaceRoot))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	// Initialize a Go workspace in the root directory of the project to enable gopls to work with multiple modules.
+	goWorkInitCmd := exec.Command("go", "work", "init", "./omashu", "./dotfs", "./halmidi")
+	goWorkInitCmd.Dir = cfg.WorkspaceRoot
+	err = goWorkInitCmd.Run()
+	if err != nil {
+		return err
+	}
+
+	mcpInstrCmd := exec.Command(cfg.LSPConfig.GoplsPath, "mcp", "-instructions")
+	stdout, err := mcpInstrCmd.Output()
+	if err != nil {
+		return err
+	}
+
+	err = os.WriteFile(fmt.Sprintf("%s/%s", cfg.WorkspaceRoot, utils.GOPLS_INSTRUCTION_FILE), stdout, 0644)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func startCrossReference(cfg *config.Config, log *zap.Logger) (mcpserver.CrossReference, func(), error) {
+	manager := lsp.NewManager(cfg, log.With(zap.String("component", "lsp")))
+	service, err := xref.New(xref.FromManager(manager), cfg.WorkspaceRoot, log.With(zap.String("component", "xref")))
 	if err != nil {
 		return nil, nil, err
 	}
 
-	logger.Info("cross-reference engine ready",
-		"gopls", cfg.LSPConfig.GoplsPath, "clangd", cfg.LSPConfig.ClangdPath, "request_timeout", cfg.LSPConfig.RequestTimeout)
+	log.Info("cross-reference engine ready",
+		zap.String("gopls", cfg.LSPConfig.GoplsPath),
+		zap.String("clangd", cfg.LSPConfig.ClangdPath),
+		zap.Duration("request_timeout", cfg.LSPConfig.RequestTimeout),
+	)
 
 	shutdown := func() {
 		// Detached from the root context, which is already cancelled by now:
@@ -256,7 +319,7 @@ func startCrossReference(cfg *config.Config, logger *slog.Logger) (mcpserver.Cro
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := manager.Close(ctx); err != nil {
-			logger.Error("language server shutdown failed", "error", err)
+			log.Error("language server shutdown failed", zap.Error(err))
 		}
 	}
 	return service, shutdown, nil
@@ -264,7 +327,8 @@ func startCrossReference(cfg *config.Config, logger *slog.Logger) (mcpserver.Cro
 
 // startValueLogGC periodically reclaims BadgerDB value-log space and returns a
 // channel closed once the collector has stopped.
-func startValueLogGC(ctx context.Context, cache *store.Store, logger *slog.Logger, every time.Duration) <-chan struct{} {
+func startValueLogGC(ctx context.Context, cache *store.Store, logger *zap.Logger,
+	every time.Duration) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -277,29 +341,12 @@ func startValueLogGC(ctx context.Context, cache *store.Store, logger *slog.Logge
 				return
 			case <-ticker.C:
 				if err := cache.RunValueLogGC(0.7); err != nil {
-					logger.Warn("cache garbage collection failed", "error", err)
+					logger.Warn("cache garbage collection failed", zap.Error(err))
 				}
 			}
 		}
 	}()
 	return done
-}
-
-// newLogger builds the structured logger. It writes to stderr because stdout is
-// reserved for the MCP JSON-RPC framing.
-func newLogger(level string) *slog.Logger {
-	var lvl slog.Level
-	switch level {
-	case "debug":
-		lvl = slog.LevelDebug
-	case "warn":
-		lvl = slog.LevelWarn
-	case "error":
-		lvl = slog.LevelError
-	default:
-		lvl = slog.LevelInfo
-	}
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
 }
 
 func cp(src, dst string) error {

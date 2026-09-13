@@ -3,14 +3,14 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"go.uber.org/zap/zaptest"
 
 	"github.com/avatar31/dotfs-mcp-server/internal/ast/indexer"
 )
@@ -54,7 +54,7 @@ func newTestServer(t *testing.T, token string, stub *stubIndexer) (*Server, stri
 		Addr:          "127.0.0.1:0",
 		APIToken:      token,
 		WorkspaceRoot: root,
-	}, stub, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, stub, zaptest.NewLogger(t))
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}

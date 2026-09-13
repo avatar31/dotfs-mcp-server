@@ -20,11 +20,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"sort"
 	"strings"
 
 	"github.com/dgraph-io/badger/v4"
+	"go.uber.org/zap"
 
 	"github.com/avatar31/dotfs-mcp-server/internal/ast"
 )
@@ -46,7 +46,7 @@ var ErrNotFound = errors.New("symbol not found in cache")
 // Store is a concurrency-safe handle around BadgerDB.
 type Store struct {
 	db  *badger.DB
-	log *slog.Logger
+	log *zap.Logger
 }
 
 // Filter narrows a symbol lookup.
@@ -77,9 +77,10 @@ type RepoStat struct {
 }
 
 // Open initialises (or re-opens) the on-disk cache at dir.
-func Open(dir string, log *slog.Logger) (*Store, error) {
+func Open(dir string, log *zap.Logger) (*Store, error) {
 	opts := badger.DefaultOptions(dir).
-		WithLogger(badgerLogger{log: log.With("component", "badger")}).
+		// WithLogger(badgerLogger{log: log.With(zap.String("component", "badger"))}).
+		WithLogger(nil).
 		WithCompactL0OnClose(true)
 
 	db, err := badger.Open(opts)
@@ -425,7 +426,7 @@ func (s *Store) PruneRepo(repo string, keep map[string]struct{}) (int, error) {
 			var rec ast.SymbolRecord
 			if err := item.Value(func(val []byte) error { return json.Unmarshal(val, &rec) }); err != nil {
 				// A corrupt payload still has to go; the key alone is enough.
-				s.log.Warn("dropping unreadable cache record", "key", key, "error", err)
+				s.log.Warn("dropping unreadable cache record", zap.String("key", key), zap.Error(err))
 			}
 			stale = append(stale, rec)
 			staleKeys = append(staleKeys, key)
@@ -541,7 +542,7 @@ func (s *Store) Stats() (map[string]RepoStat, error) {
 // This matters for correctness, not just tidiness: the MCP transport owns
 // stdout, so every internal log line must be routed to the structured logger
 // (stderr) instead.
-type badgerLogger struct{ log *slog.Logger }
+type badgerLogger struct{ log *zap.Logger }
 
 func (l badgerLogger) Errorf(f string, a ...any) {
 	l.log.Error(strings.TrimSpace(fmt.Sprintf(f, a...)))

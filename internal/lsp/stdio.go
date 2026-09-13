@@ -6,52 +6,55 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/textproto"
 	"os"
 	"strconv"
 	"sync"
+
+	"go.uber.org/zap"
 )
 
 type stdio struct {
-	writeMu sync.Mutex
-	writer  io.WriteCloser
+	clientName string
+	writeMu    sync.Mutex
+	writer     io.WriteCloser
 
 	reader *textproto.Reader
-	log    *slog.Logger
+	log    *zap.Logger
 }
 
 // newStdio wraps r with the buffering the header parser requires.
-func newStdio(w io.WriteCloser, r io.Reader, log *slog.Logger) *stdio {
+func newStdio(name string, w io.WriteCloser, r io.Reader, log *zap.Logger) *stdio {
 	return &stdio{
-		writer: w,
-		reader: textproto.NewReader(bufio.NewReaderSize(r, 64<<10)),
-		log:    log,
+		clientName: name,
+		writer:     w,
+		reader:     textproto.NewReader(bufio.NewReaderSize(r, 64<<10)),
+		log:        log.With(zap.String("client", name)),
 	}
 }
 
 // readLoop decodes frames until the stream ends or breaks.
-func (s *stdio) readLoop(clientName string, dispatch func(msg inboundMessage)) error {
+func (s *stdio) readLoop(dispatch func(msg inboundMessage)) error {
 	for {
 		payload, err := s.read()
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, os.ErrClosed) {
-				return fmt.Errorf("lsp: %s closed stdout pipe: %w", clientName, err)
+				return fmt.Errorf("lsp: %s closed stdout pipe: %w", s.clientName, err)
 			}
-			return fmt.Errorf("lsp: %s stream error: %w", clientName, err)
+			return fmt.Errorf("lsp: %s stream error: %w", s.clientName, err)
 		}
 
 		var msg inboundMessage
 		if err := json.Unmarshal(payload, &msg); err != nil {
-			s.log.Warn("discarding unparsable lsp frame", "server", clientName, "error", err)
+			s.log.Warn("discarding unparsable lsp frame", zap.Error(err))
 			continue
 		}
 
 		switch {
 		case msg.Method != "" && len(msg.ID) > 0:
-			s.answerRequest(clientName, msg)
+			s.answerRequest(s.clientName, msg)
 		case msg.Method != "":
-			s.log.Debug("lsp notification", "server", clientName, "method", msg.Method)
+			s.log.Debug("lsp notification", zap.Any("inbound-message", msg))
 		default:
 			dispatch(msg)
 		}
@@ -84,7 +87,10 @@ func (s *stdio) answerRequest(clientName string, msg inboundMessage) {
 		Result:      result,
 	}
 	if err := s.write(params); err != nil {
-		s.log.Warn("failed to answer server request", "server", clientName, "method", msg.Method, "error", err)
+		s.log.Warn("failed to answer server request",
+			zap.String("method", msg.Method),
+			zap.Error(err),
+		)
 	}
 }
 
@@ -117,6 +123,8 @@ func (s *stdio) read() ([]byte, error) {
 
 // https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#contentPart
 func (s *stdio) write(body any) error {
+	s.log.Debug("LSP message", zap.Any("outbound-message", body))
+
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("lsp: marshal frame: %w", err)

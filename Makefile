@@ -28,8 +28,11 @@ fmt:
 tidy:
 	go mod tidy
 
-run: build_binary
-	./$(BIN_DIR)/$(BINARY)
+install: build_binary
+	cp $(BIN_DIR)/$(BINARY) /usr/local/bin/$(BINARY)
+
+run: install
+	$(BINARY)
 
 clean:
 	rm -rf $(BIN_DIR) agent_knowledge

@@ -51,7 +51,7 @@ func want(t *testing.T, symbols map[string]Symbol, name string) Symbol {
 }
 
 func TestGoEngineExtractsFunctionsAndMethods(t *testing.T) {
-	symbols := parseFixture(t, NewGoEngine(), "../../testdata/workspace/auth-service-go/token.go")
+	symbols := parseFixture(t, NewGoEngine(), "../../../testdata/workspace/auth-service-go/token.go")
 
 	fn := want(t, symbols, "ValidateSessionToken")
 	if fn.Type != ast.SymbolFunction {
@@ -83,7 +83,7 @@ func TestGoEngineExtractsFunctionsAndMethods(t *testing.T) {
 }
 
 func TestGoEngineExtractsTypesInterfacesAndConstants(t *testing.T) {
-	symbols := parseFixture(t, NewGoEngine(), "../../testdata/workspace/auth-service-go/types.go")
+	symbols := parseFixture(t, NewGoEngine(), "../../../testdata/workspace/auth-service-go/types.go")
 
 	st := want(t, symbols, "Session")
 	if st.Type != ast.SymbolStruct {
@@ -139,14 +139,14 @@ func TestGoEngineExtractsTypesInterfacesAndConstants(t *testing.T) {
 	}
 
 	// Exported package-level variables are indexed; unexported ones are not.
-	tokens := parseFixture(t, NewGoEngine(), "../../testdata/workspace/auth-service-go/token.go")
+	tokens := parseFixture(t, NewGoEngine(), "../../../testdata/workspace/auth-service-go/token.go")
 	if _, ok := tokens["ErrExpired"]; !ok {
 		t.Error("exported package variable ErrExpired was not indexed")
 	}
 }
 
 func TestCEngineExtractsMacrosRecordsEnumsAndTypedefs(t *testing.T) {
-	symbols := parseFixture(t, NewCEngine(), "../../testdata/workspace/packet-router-c/router.h")
+	symbols := parseFixture(t, NewCEngine(), "../../../testdata/workspace/packet-router-c/router.h")
 
 	macro := want(t, symbols, "ROUTER_QUEUE_DEPTH")
 	if macro.Type != ast.SymbolMacro {
@@ -212,7 +212,7 @@ func TestCEngineExtractsMacrosRecordsEnumsAndTypedefs(t *testing.T) {
 }
 
 func TestCEngineIgnoresNonDefinitions(t *testing.T) {
-	symbols := parseFixture(t, NewCEngine(), "../../testdata/workspace/packet-router-c/router.c")
+	symbols := parseFixture(t, NewCEngine(), "../../../testdata/workspace/packet-router-c/router.c")
 
 	fn := want(t, symbols, "read_session_header")
 	if !strings.HasPrefix(fn.SourceCode, "int read_session_header(") {

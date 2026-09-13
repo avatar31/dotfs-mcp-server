@@ -9,11 +9,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/http"
 	"strings"
 	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/avatar31/dotfs-mcp-server/internal/ast/indexer"
 	"github.com/avatar31/dotfs-mcp-server/internal/utils"
@@ -39,7 +40,7 @@ type Config struct {
 type Server struct {
 	cfg     Config
 	indexer Reindexer
-	log     *slog.Logger
+	log     *zap.Logger
 	jobs    *JobTracker
 	http    *http.Server
 	// baseCtx outlives individual requests so background workers survive the
@@ -48,7 +49,7 @@ type Server struct {
 }
 
 // New builds the management server bound to cfg.Addr.
-func New(baseCtx context.Context, cfg Config, idx Reindexer, log *slog.Logger) (*Server, error) {
+func New(baseCtx context.Context, cfg Config, idx Reindexer, log *zap.Logger) (*Server, error) {
 	if idx == nil || log == nil {
 		return nil, errors.New("httpapi: indexer and logger are required")
 	}
@@ -83,7 +84,8 @@ func New(baseCtx context.Context, cfg Config, idx Reindexer, log *slog.Logger) (
 
 // ListenAndServe blocks until the server is shut down.
 func (s *Server) ListenAndServe() error {
-	s.log.Info("management API listening", "addr", s.cfg.Addr, "auth_required", s.cfg.APIToken != "")
+	s.log.Info("management API listening", zap.String("addr", s.cfg.Addr),
+		zap.Bool("auth_required", s.cfg.APIToken != ""))
 	if err := s.http.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("management API: %w", err)
 	}
@@ -141,7 +143,7 @@ func (s *Server) runIndexJob(repo string) {
 	defer s.jobs.Finish(repo)
 	defer func() {
 		if rec := recover(); rec != nil {
-			s.log.Error("indexing worker panicked", "repo", repo, "panic", rec)
+			s.log.Error("indexing worker panicked", zap.String("repo", repo), zap.Any("panic", rec))
 		}
 	}()
 
@@ -150,16 +152,16 @@ func (s *Server) runIndexJob(repo string) {
 
 	summary, err := s.indexer.IndexRepo(ctx, repo)
 	if err != nil {
-		s.log.Error("on-demand indexing failed", "repo", repo, "error", err)
+		s.log.Error("on-demand indexing failed", zap.String("repo", repo), zap.Error(err))
 		return
 	}
 	s.log.Info("on-demand indexing complete",
-		"repo", repo,
-		"files_parsed", summary.FilesParsed,
-		"symbols", summary.SymbolsFound,
-		"written", summary.RecordsWritten,
-		"pruned", summary.RecordsPruned,
-		"duration_ms", summary.DurationMS,
+		zap.String("repo", repo),
+		zap.Int("files_parsed", summary.FilesParsed),
+		zap.Int("symbols", summary.SymbolsFound),
+		zap.Int("written", summary.RecordsWritten),
+		zap.Int("pruned", summary.RecordsPruned),
+		zap.Int64("duration_ms", summary.DurationMS),
 	)
 }
 
@@ -171,7 +173,7 @@ func (s *Server) handleListRepos(w http.ResponseWriter, r *http.Request) {
 
 	repos, err := s.indexer.ListRepos()
 	if err != nil {
-		s.log.Error("failed to list repositories", "error", err)
+		s.log.Error("failed to list repositories", zap.Error(err))
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list repositories"})
 		return
 	}
@@ -210,10 +212,10 @@ func (s *Server) withLogging(next http.Handler) http.Handler {
 		started := time.Now()
 		next.ServeHTTP(w, r)
 		s.log.Debug("http request",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"remote", r.RemoteAddr,
-			"duration_ms", time.Since(started).Milliseconds(),
+			zap.String("method", r.Method),
+			zap.String("path", r.URL.Path),
+			zap.String("remote", r.RemoteAddr),
+			zap.Int64("duration_ms", time.Since(started).Milliseconds()),
 		)
 	})
 }
@@ -222,7 +224,7 @@ func (s *Server) withRecovery(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				s.log.Error("http handler panicked", "path", r.URL.Path, "panic", rec)
+				s.log.Error("http handler panicked", zap.String("path", r.URL.Path), zap.Any("panic", rec))
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
 			}
 		}()

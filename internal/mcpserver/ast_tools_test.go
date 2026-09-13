@@ -4,12 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
-	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	"go.uber.org/zap/zaptest"
 
 	"github.com/avatar31/dotfs-mcp-server/internal/ast"
 	"github.com/avatar31/dotfs-mcp-server/internal/ast/store"
@@ -89,12 +88,12 @@ func (s *stubScanner) ReadSnippet(repo, path string, start, end int) (string, er
 	return s.snippet, s.snipErr
 }
 
-func newDeps(cache Cache, scanner LiveScanner, profiles []capabilities.Profile) Deps {
+func newDeps(t *testing.T, cache Cache, scanner LiveScanner, profiles []capabilities.Profile) Deps {
 	return Deps{
 		Cache:    cache,
 		Scanner:  scanner,
 		Matrix:   capabilities.NewMatrix(profiles),
-		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Log:      zaptest.NewLogger(t),
 		Name:     "test",
 		Version:  "0.0.1",
 		LiveScan: true,
@@ -138,7 +137,7 @@ func sym(repo, name string, kind ast.SymbolType, lang utils.Language) ast.Symbol
 }
 
 func TestNewRegistersTheFullToolkit(t *testing.T) {
-	srv, err := New(newDeps(&stubCache{}, &stubScanner{}, nil))
+	srv, err := New(newDeps(t, &stubCache{}, &stubScanner{}, nil))
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
@@ -153,7 +152,7 @@ func TestNewRegistersTheFullToolkit(t *testing.T) {
 func TestGlobalSearchReturnsCachedRecordAsJSON(t *testing.T) {
 	rec := sym("packet-router-c", "read_session_header", ast.SymbolFunction, utils.LanguageC)
 	scanner := &stubScanner{}
-	deps := newDeps(&stubCache{records: []ast.SymbolRecord{rec}}, scanner, nil)
+	deps := newDeps(t, &stubCache{records: []ast.SymbolRecord{rec}}, scanner, nil)
 
 	res, err := deps.handleGlobalSearch(context.Background(), callTool(t, map[string]any{
 		"target_function_name": "read_session_header",
@@ -180,7 +179,7 @@ func TestGlobalSearchReturnsCachedRecordAsJSON(t *testing.T) {
 func TestGlobalSearchFallsBackToLiveScan(t *testing.T) {
 	live := sym("packet-router-c", "route_packet", ast.SymbolFunction, utils.LanguageC)
 	scanner := &stubScanner{records: []ast.SymbolRecord{live}}
-	deps := newDeps(&stubCache{}, scanner, nil)
+	deps := newDeps(t, &stubCache{}, scanner, nil)
 
 	res, err := deps.handleGlobalSearch(context.Background(), callTool(t, map[string]any{
 		"target_function_name": "route_packet",
@@ -203,7 +202,7 @@ func TestGlobalSearchFallsBackToLiveScan(t *testing.T) {
 }
 
 func TestGlobalSearchReportsMissesAndBadInput(t *testing.T) {
-	deps := newDeps(&stubCache{}, &stubScanner{}, nil)
+	deps := newDeps(t, &stubCache{}, &stubScanner{}, nil)
 
 	res, err := deps.handleGlobalSearch(context.Background(), callTool(t, map[string]any{
 		"target_function_name": "nope",
@@ -227,7 +226,7 @@ func TestGlobalSearchReportsMissesAndBadInput(t *testing.T) {
 }
 
 func TestGlobalSearchSurfacesCacheFailures(t *testing.T) {
-	deps := newDeps(&stubCache{err: errors.New("badger is on fire")}, &stubScanner{}, nil)
+	deps := newDeps(t, &stubCache{err: errors.New("badger is on fire")}, &stubScanner{}, nil)
 
 	res, err := deps.handleGlobalSearch(context.Background(), callTool(t, map[string]any{
 		"target_function_name": "anything",
@@ -246,7 +245,7 @@ func TestLookupSymbolSupportsPrefixAndFilters(t *testing.T) {
 		sym("nfs-ganesha", "ERR_FSAL_STALE", ast.SymbolMacro, utils.LanguageC),
 		sym("auth-service-go", "ERR_FSAL_HANDLE", ast.SymbolStruct, utils.LanguageGo),
 	}}
-	deps := newDeps(cache, &stubScanner{}, nil)
+	deps := newDeps(t, cache, &stubScanner{}, nil)
 
 	res, err := deps.handleLookupSymbol(context.Background(), callTool(t, map[string]any{"name": "ERR_FSAL"}))
 	if err != nil {
@@ -296,7 +295,7 @@ func TestGetTypeDefinitionRestrictsToTypeKinds(t *testing.T) {
 		sym("nfs-ganesha", "fsal_obj_handle", ast.SymbolStruct, utils.LanguageC),
 		sym("nfs-ganesha", "fsal_obj_handle", ast.SymbolFunction, utils.LanguageC),
 	}}
-	deps := newDeps(cache, &stubScanner{}, nil)
+	deps := newDeps(t, cache, &stubScanner{}, nil)
 
 	res, err := deps.handleTypeDefinition(context.Background(), callTool(t, map[string]any{
 		"type_name": "fsal_obj_handle",
@@ -326,7 +325,7 @@ func TestLookupMacroOrConstRestrictsToValueKinds(t *testing.T) {
 		sym("auth-service-go", "StatusPending", ast.SymbolConstant, utils.LanguageGo),
 		sym("auth-service-go", "StatusPending", ast.SymbolInterface, utils.LanguageGo),
 	}}
-	deps := newDeps(cache, &stubScanner{}, nil)
+	deps := newDeps(t, cache, &stubScanner{}, nil)
 
 	res, err := deps.handleMacroOrConst(context.Background(), callTool(t, map[string]any{"name": "StatusPending"}))
 	if err != nil {
@@ -343,7 +342,7 @@ func TestLookupMacroOrConstRestrictsToValueKinds(t *testing.T) {
 
 func TestReadCodeSnippetValidatesInputAndDelegates(t *testing.T) {
 	scanner := &stubScanner{snippet: "     1 | package auth\n"}
-	deps := newDeps(&stubCache{}, scanner, nil)
+	deps := newDeps(t, &stubCache{}, scanner, nil)
 
 	res, err := deps.handleReadSnippet(context.Background(), callTool(t, map[string]any{
 		"repo_name":  "auth-service-go",
@@ -406,7 +405,7 @@ func TestListCapabilitiesMergesCuratedAndObservedFacts(t *testing.T) {
 			Samples:     []string{"ValidateSessionToken", "Session"},
 		},
 	}}
-	deps := newDeps(cache, &stubScanner{}, []capabilities.Profile{{
+	deps := newDeps(t, cache, &stubScanner{}, []capabilities.Profile{{
 		Repo:     "auth-service-go",
 		Language: "Go",
 		Summary:  "Issues and validates session tokens.",
@@ -457,7 +456,7 @@ func TestListCapabilitiesMergesCuratedAndObservedFacts(t *testing.T) {
 
 func TestLiveScanDisabledSkipsFallback(t *testing.T) {
 	scanner := &stubScanner{}
-	deps := newDeps(&stubCache{}, scanner, nil)
+	deps := newDeps(t, &stubCache{}, scanner, nil)
 	deps.LiveScan = false
 
 	res, err := deps.handleLookupSymbol(context.Background(), callTool(t, map[string]any{"name": "anything"}))

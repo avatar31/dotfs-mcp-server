@@ -18,7 +18,9 @@ When tasked with debugging, bug fixes, or feature development:
     4. `lookup_macro_or_const` for macro or constant retrieval.
     5. `read_code_snippet` for code snippet retrieval.
     6. `list_repo_capabilities` for repo capabilities retrieval.
-- **Compiler Cross-References:** via live `clangd` (C) and `gopls` (Go)
+- **Compiler Cross-References for Golang: via native `gopls mcp`**
+    1. Refer `GOPLS_MCP.md` for details on how to use `gopls mcp` for cross-references.
+- **Compiler Cross-References for C: via live `clangd`**
     1. `find_references` for symbol references.
     2. `get_call_hierarchy` for call hierarchy.
     3. `find_interface_implementations` for interface implementations.

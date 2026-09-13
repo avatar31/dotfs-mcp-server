@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"go.uber.org/zap"
+
 	"github.com/avatar31/dotfs-mcp-server/internal/lsp"
 )
 
@@ -100,7 +102,7 @@ func (s *Service) locate(abs string) (repo, rel string) {
 func (s *Service) reference(uri lsp.DocumentURI, pos lsp.Position, src *sourceCache) (Reference, bool) {
 	abs, err := uri.Path()
 	if err != nil {
-		s.log.Debug("skipping unusable lsp uri", "uri", string(uri), "error", err)
+		s.log.Debug("skipping unusable lsp uri", zap.String("uri", string(uri)), zap.Error(err))
 		return Reference{}, false
 	}
 

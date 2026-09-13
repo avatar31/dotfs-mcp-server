@@ -1,20 +1,18 @@
 package store
 
 import (
-	"io"
-	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/avatar31/dotfs-mcp-server/internal/ast"
 	"github.com/avatar31/dotfs-mcp-server/internal/utils"
+	"go.uber.org/zap/zaptest"
 )
 
 func testStore(t *testing.T) *Store {
 	t.Helper()
 
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	st, err := Open(t.TempDir(), log)
+	st, err := Open(t.TempDir(), zaptest.NewLogger(t))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

@@ -16,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -29,6 +28,7 @@ import (
 	"github.com/avatar31/dotfs-mcp-server/internal/ast/parser"
 	"github.com/avatar31/dotfs-mcp-server/internal/ast/store"
 	"github.com/avatar31/dotfs-mcp-server/internal/utils"
+	"go.uber.org/zap"
 )
 
 // MaxSnippetLines caps a single read_code_snippet response.
@@ -64,13 +64,13 @@ type Summary struct {
 type Indexer struct {
 	store    *store.Store
 	registry *parser.Registry
-	log      *slog.Logger
+	log      *zap.Logger
 	opts     Options
 	skipDirs map[string]struct{}
 }
 
 // New builds an Indexer. Workers defaults to the CPU count.
-func New(st *store.Store, registry *parser.Registry, log *slog.Logger, opts Options) (*Indexer, error) {
+func New(st *store.Store, registry *parser.Registry, log *zap.Logger, opts Options) (*Indexer, error) {
 	if st == nil || registry == nil {
 		return nil, errors.New("indexer requires a store and a parser registry")
 	}
@@ -108,7 +108,7 @@ func (ix *Indexer) ListRepos() ([]string, error) {
 			continue
 		}
 		if utils.ValidateRepoName(name) != nil {
-			ix.log.Debug("skipping non-addressable workspace entry", "entry", name)
+			ix.log.Debug("skipping non-addressable workspace entry", zap.String("entry", name))
 			continue
 		}
 		repos = append(repos, name)
@@ -133,7 +133,7 @@ func (ix *Indexer) IndexAll(ctx context.Context) ([]Summary, error) {
 		summary, err := ix.IndexRepo(ctx, repo)
 		if err != nil {
 			// One broken repository must not abort the whole workspace crawl.
-			ix.log.Error("repository indexing failed", "repo", repo, "error", err)
+			ix.log.Error("repository indexing failed", zap.String("repo", repo), zap.Error(err))
 			continue
 		}
 		summaries = append(summaries, summary)
@@ -204,7 +204,7 @@ func (ix *Indexer) IndexRepo(ctx context.Context, repo string) (Summary, error) 
 		switch {
 		case res.err != nil:
 			summary.ParseErrors++
-			ix.log.Warn("parse failure", "repo", repo, "file", res.relPath, "error", res.err)
+			ix.log.Warn("parse failure", zap.String("repo", repo), zap.String("file", res.relPath), zap.Error(res.err))
 			continue
 		case res.symbols == nil:
 			summary.FilesFiltered++
@@ -219,7 +219,8 @@ func (ix *Indexer) IndexRepo(ctx context.Context, repo string) (Summary, error) 
 			key, written, err := ix.store.PutSymbol(rec)
 			if err != nil {
 				summary.ParseErrors++
-				ix.log.Error("cache write failed", "repo", repo, "symbol", sym.Name, "error", err)
+				ix.log.Warn("cache write failed", zap.String("repo", repo), zap.String("symbol", sym.Name),
+					zap.Error(res.err))
 				continue
 			}
 			live[key] = struct{}{}
@@ -242,14 +243,14 @@ func (ix *Indexer) IndexRepo(ctx context.Context, repo string) (Summary, error) 
 	summary.DurationMS = time.Since(started).Milliseconds()
 
 	ix.log.Info("repository indexed",
-		"repo", repo,
-		"files_scanned", summary.FilesScanned,
-		"files_parsed", summary.FilesParsed,
-		"symbols", summary.SymbolsFound,
-		"written", summary.RecordsWritten,
-		"pruned", summary.RecordsPruned,
-		"errors", summary.ParseErrors,
-		"duration_ms", summary.DurationMS,
+		zap.String("repo", repo),
+		zap.Int("files_scanned", summary.FilesScanned),
+		zap.Int("files_parsed", summary.FilesParsed),
+		zap.Int("symbols", summary.SymbolsFound),
+		zap.Int("written", summary.RecordsWritten),
+		zap.Int("pruned", summary.RecordsPruned),
+		zap.Int("errors", summary.ParseErrors),
+		zap.Int64("duration_ms", summary.DurationMS),
 	)
 	return summary, nil
 }
@@ -292,7 +293,7 @@ func (ix *Indexer) SearchLive(ctx context.Context, target string, types []ast.Sy
 	for _, repo := range repos {
 		repoPath, err := utils.SafeRepoPath(ix.opts.WorkspaceRoot, repo)
 		if err != nil {
-			ix.log.Warn("skipping unreadable repository", "repo", repo, "error", err)
+			ix.log.Warn("skipping unreadable repository", zap.String("repo", repo), zap.Error(err))
 			continue
 		}
 		files, _, err := ix.collectFiles(ctx, repoPath)
@@ -307,7 +308,7 @@ func (ix *Indexer) SearchLive(ctx context.Context, target string, types []ast.Sy
 
 			res := ix.parseFile(ctx, repoPath, path, target)
 			if res.err != nil {
-				ix.log.Debug("live scan parse failure", "file", res.relPath, "error", res.err)
+				ix.log.Debug("live scan parse failure", zap.String("file", res.relPath), zap.Error(res.err))
 				continue
 			}
 
@@ -322,7 +323,7 @@ func (ix *Indexer) SearchLive(ctx context.Context, target string, types []ast.Sy
 				}
 				rec := toRecord(repo, res.relPath, sym)
 				if _, _, err := ix.store.PutSymbol(rec); err != nil {
-					ix.log.Error("failed to cache live scan hit", "symbol", sym.Name, "error", err)
+					ix.log.Error("failed to cache live scan hit", zap.String("symbol", sym.Name), zap.Error(err))
 				}
 				matches = append(matches, rec)
 				if len(matches) >= maxLiveMatches {
@@ -458,7 +459,7 @@ func (ix *Indexer) collectFiles(ctx context.Context, repoPath string) ([]string,
 
 	err := filepath.WalkDir(repoPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			ix.log.Warn("walk error", "path", path, "error", err)
+			ix.log.Warn("walk error", zap.String("path", path), zap.Error(err))
 			return nil // keep crawling the rest of the tree
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -482,11 +483,11 @@ func (ix *Indexer) collectFiles(ctx context.Context, repoPath string) ([]string,
 		scanned++
 		info, err := d.Info()
 		if err != nil {
-			ix.log.Warn("stat failed", "path", path, "error", err)
+			ix.log.Warn("stat failed", zap.String("path", path), zap.Error(err))
 			return nil
 		}
 		if info.Size() > ix.opts.MaxFileSize {
-			ix.log.Debug("skipping oversized file", "path", path, "size", info.Size())
+			ix.log.Debug("skipping oversized file", zap.String("path", path), zap.Int64("size", info.Size()))
 			return nil
 		}
 

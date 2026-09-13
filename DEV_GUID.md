@@ -408,7 +408,7 @@ or a container.
 | `DOTFS_MAX_FILE_SIZE` | `2097152` (2 MiB) | skip source files larger than this |
 | `DOTFS_SKIP_DIRS` | `.git,.svn,.hg,node_modules,vendor,third_party,build,dist,out,.idea,.vscode` | pruned during the walk |
 | `DOTFS_GC_INTERVAL` | `10m` | BadgerDB value-log GC cadence |
-| `DOTFS_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` (always to stderr) |
+| `DOTFS_LOG_PATH` | `/var/log/dotfs-mcp-server.log` | log file path |
 | `DOTFS_SERVER_NAME` / `DOTFS_SERVER_VERSION` | `dotfs-mcp-server` / `1.0.0` | announced in the MCP handshake |
 
 ### Management API
@@ -423,7 +423,6 @@ or a container.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `DOTFS_LSP_ENABLED` | `true` | when `false`, the four relational tools are not registered at all |
 | `DOTFS_GOPLS_PATH` | `gopls` | executable name resolved via `PATH`, or an absolute path |
 | `DOTFS_CLANGD_PATH` | `clangd` | executable name or absolute path |
 | `DOTFS_CLANGD_ARGS` | *(empty)* | comma-separated extra flags appended to the clangd command line |
@@ -502,16 +501,6 @@ pipe and makes the handshake race.
 3. Keep the payload compact: minified JSON, capped result count, snippets instead of whole
    files. Tokens are the real budget.
 4. Add a handler test asserting both the happy path and each validation branch.
-
-### Debugging
-
-```bash
-DOTFS_LOG_LEVEL=debug ./bin/dotfs-mcp-server 2>/tmp/dotfs.log
-grep "language server" /tmp/dotfs.log     # spawn / exit / respawn events
-```
-
-Never write to stdout from anywhere in the process: it is the MCP JSON-RPC channel. All
-logging goes to stderr, including the language servers' own stderr.
 
 ---
 

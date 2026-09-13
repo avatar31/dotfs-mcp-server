@@ -1,0 +1,19 @@
+{
+    "mcp": {
+        "servers": {
+            "dotfs-mcp-server": {
+                "type": "http",
+				"url": "http://localhost:9701/mcp"
+            },
+            "gopls-native": {
+                "command": "gopls",
+                "args": [
+                    "mcp"
+                ],
+                "options": {
+                    "cwd": "${workspaceFolder}"
+                }
+            }
+        }
+    }
+}

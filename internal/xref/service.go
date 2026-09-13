@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/avatar31/dotfs-mcp-server/internal/config"
 	"github.com/avatar31/dotfs-mcp-server/internal/lsp"
@@ -41,14 +42,14 @@ func (t target) params() lsp.TextDocumentPositionParams {
 type Service struct {
 	provider Provider
 	root     string
-	log      *slog.Logger
+	log      *zap.Logger
 	limit    int
 	timeout  time.Duration
 }
 
 // New builds the service. workspaceRoot must be the same directory the indexer
 // walks, because every result is reported relative to it.
-func New(provider Provider, workspaceRoot string, log *slog.Logger) (*Service, error) {
+func New(provider Provider, workspaceRoot string, log *zap.Logger) (*Service, error) {
 	if provider == nil {
 		return nil, errors.New("xref: a session provider is required")
 	}
@@ -67,7 +68,13 @@ func New(provider Provider, workspaceRoot string, log *slog.Logger) (*Service, e
 	if timeout <= 0 {
 		timeout = config.DefaultRequestTimeout
 	}
-	return &Service{provider: provider, root: root, log: log, limit: MaxResults, timeout: timeout}, nil
+	return &Service{
+		provider: provider,
+		root:     root,
+		log:      log,
+		limit:    MaxResults,
+		timeout:  timeout,
+	}, nil
 }
 
 // resolve validates the request, proves the file lives inside the repository,
@@ -374,7 +381,7 @@ func (s *Service) TypeHierarchy(ctx context.Context, req TypeHierarchyRequest) (
 		if !lsp.IsMethodNotFound(err) {
 			return TypeHierarchyResult{}, err
 		}
-		s.log.Debug("type hierarchy unsupported by this server", "repo", t.repo)
+		s.log.Debug("type hierarchy unsupported by this server", zap.String("repo", t.repo))
 	}
 
 	if len(items) == 0 {
@@ -416,7 +423,7 @@ func (s *Service) typeDefinition(ctx context.Context, t *target) *Reference {
 		// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_typeDefinition
 		var raw json.RawMessage
 		if err := s.call(ctx, t.session, method, t.params(), &raw); err != nil {
-			s.log.Debug("definition lookup failed", "method", method, "error", err)
+			s.log.Debug("definition lookup failed", zap.String("method", method), zap.Error(err))
 			continue
 		}
 		locations, err := decodeLocations(raw)

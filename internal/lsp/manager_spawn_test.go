@@ -4,13 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest"
 
 	"github.com/avatar31/dotfs-mcp-server/internal/config"
 	"github.com/avatar31/dotfs-mcp-server/internal/utils"
@@ -21,11 +22,13 @@ import (
 // block-buffers its stdout when it is a pipe, which makes the handshake race.
 const fakeDaemonEnv = "DOTFS_TEST_FAKE_LSP"
 
-func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
-
 func TestMain(m *testing.M) {
 	if counter := os.Getenv(fakeDaemonEnv); counter != "" {
-		runFakeDaemon(counter)
+		suiteLogger, err := zap.NewDevelopment()
+		if err != nil {
+			panic(err)
+		}
+		runFakeDaemon(counter, suiteLogger)
 		return
 	}
 	os.Exit(m.Run())
@@ -33,13 +36,13 @@ func TestMain(m *testing.M) {
 
 // runFakeDaemon records the start, then answers every request with an empty
 // result until stdin closes. Notifications are swallowed.
-func runFakeDaemon(counter string) {
+func runFakeDaemon(counter string, log *zap.Logger) {
 	if file, err := os.OpenFile(counter, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
 		fmt.Fprintln(file, "start")
 		_ = file.Close()
 	}
 
-	stdio := newStdio(os.Stdout, os.Stdin, discardLogger())
+	stdio := newStdio("test", os.Stdout, os.Stdin, log)
 	for {
 		payload, err := stdio.read()
 		if err != nil {
@@ -79,8 +82,8 @@ func fakeDaemonManager(t *testing.T) (*Manager, string, string) {
 		t.Fatalf("locate the test binary: %v", err)
 	}
 
-	cfg := &config.Config{LSPConfig: &config.LSPConfig{Enabled: true, GoplsPath: self, InitTimeout: 10 * time.Second}}
-	mgr := NewManager(cfg, discardLogger())
+	cfg := &config.Config{LSPConfig: &config.LSPConfig{GoplsPath: self, InitTimeout: 10 * time.Second}}
+	mgr := NewManager(cfg, zaptest.NewLogger(t))
 	t.Cleanup(func() { _ = mgr.Close(context.Background()) })
 	return mgr, repoDir, counter
 }

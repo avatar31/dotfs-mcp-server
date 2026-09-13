@@ -14,3 +14,7 @@ const (
 func (l Language) Valid() bool {
 	return l == LanguageC || l == LanguageGo
 }
+
+const (
+	GOPLS_INSTRUCTION_FILE = "GOPLS_MCP.md"
+)

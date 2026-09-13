@@ -92,9 +92,8 @@ sub-directories are the repositories. The directory name becomes `repo_name`.
 | `DOTFS_MAX_FILE_SIZE` | `2097152` | Skip source files larger than this (bytes) |
 | `DOTFS_SKIP_DIRS` | `.git,node_modules,vendor,...` | Comma-separated directory names to prune |
 | `DOTFS_GC_INTERVAL` | `10m` | BadgerDB value-log GC cadence |
-| `DOTFS_LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` |
+| `DOTFS_LOG_PATH` | `/var/log/dotfs-mcp-server.log` | Log file Path |
 | `DOTFS_SERVER_NAME` / `DOTFS_SERVER_VERSION` | `dotfs-mcp-server` / `1.0.0` | Advertised during the MCP handshake |
-| `DOTFS_LSP_ENABLED` | `true` | Enable the relational engine (gopls/clangd) |
 | `DOTFS_LSP_TIMEOUT` | `5s` | Maximum time to wait for a warm LSP response |
 | `DOTFS_LSP_INIT_TIMEOUT` | `45s` | Maximum time to wait for a cold LSP response |
 | `DOTFS_GOPLS_PATH` | `gopls` | Path to the Go language server |
@@ -205,24 +204,48 @@ implemented features, integration interfaces and the observed structural
 footprint — symbol count, declaration mix by kind, and representative entry
 points.
 
-### `find_references(repo_name, file_path, line, character, include_declaration)`
+```json
+{"repo_name": "auth-service-go"}
+```
+
+### LSP tools (Only for C)
+#### `find_references(repo_name, file_path, line, character, include_declaration)`
 
 Returns a list of all call sites and references to the symbol at the given
 position. `include_declaration` controls whether the declaration itself is
 returned in the list.
 
-### `get_call_hierarchy(repo_name, file_path, line, character, direction)`
+```json
+{"repo_name": "auth-service-go", "file_path": "auth.go", "line": 42, "character": 12, "include_declaration": true}
+```
+
+#### `get_call_hierarchy(repo_name, file_path, line, character, direction)`
 
 Returns a tree of all callers or callees of the symbol at the given position.
 
-### `find_interface_implementations(repo_name, file_path, line, character)`
+```json
+{"repo_name": "auth-service-go", "file_path": "auth.go", "line": 42, "character": 12, "direction": "up"}
+```
+
+#### `find_interface_implementations(repo_name, file_path, line, character)`
 
 Returns a list of all concrete types that implement the interface at the given
 position.
 
-### `get_type_hierarchy(repo_name, file_path, line, character, direction)`
+```json
+{"repo_name": "auth-service-go", "file_path": "auth.go", "line": 42, "character": 12}
+```
+
+#### `get_type_hierarchy(repo_name, file_path, line, character, direction)`
 
 Returns a tree of all subtypes or supertypes of the type at the given position.
+
+```json
+{"repo_name": "auth-service-go", "file_path": "auth.go", "line": 42, "character": 12, "direction": "down"}
+```
+
+### LSP tools (Only for Go)
+For Go, using native `gopls mcp` server.
 
 ---
 
@@ -310,8 +333,6 @@ Pruning is scoped to the repository being indexed and batched 512 keys at a time
 * **Upgrading from Phase 1:** the `func:` / `idx:<repo>:` namespace is gone.
   Delete `DOTFS_CACHE_DB` once; the Phase 2 namespace rebuilds on next boot.
 * **Cache reset:** stop the server and delete `DOTFS_CACHE_DB`.
-* **Debugging:** `DOTFS_LOG_LEVEL=debug` adds per-file filter decisions and
-  BadgerDB internals on stderr.
 
 ---
 

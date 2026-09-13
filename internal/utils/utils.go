@@ -73,7 +73,7 @@ func IsWithinRepo(root, child string) bool {
 func LanguageFor(path string) (Language, error) {
 	switch filepath.Ext(path) {
 	case ".go":
-		return LanguageGo, nil
+		return "", ErrUnsupportedGoLanguage
 	case ".c", ".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx":
 		return LanguageC, nil
 	default:

@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/avatar31/dotfs-mcp-server/internal/config"
 )
@@ -27,7 +28,7 @@ type Client struct {
 	name  string
 	cmd   *exec.Cmd
 	stdio *stdio
-	log   *slog.Logger
+	log   *zap.Logger
 
 	mu      sync.Mutex
 	nextID  int64
@@ -45,11 +46,11 @@ type Client struct {
 
 // newClient wires a client onto an arbitrary stream pair. cmd may be nil, which
 // is what the unit tests use to drive an in-process fake server.
-func newClient(name string, stdin io.WriteCloser, stdout io.Reader, cmd *exec.Cmd, log *slog.Logger) *Client {
-	stdio := newStdio(stdin, stdout, log)
+func newClient(name string, stdin io.WriteCloser, stdout io.Reader, cmd *exec.Cmd, log *zap.Logger) *Client {
+	stdio := newStdio(name, stdin, stdout, log)
 	c := &Client{
 		name:    name,
-		log:     log,
+		log:     log.With(zap.String("client", name)),
 		cmd:     cmd,
 		stdio:   stdio,
 		pending: make(map[int64]chan *ResponseMessage),
@@ -118,12 +119,12 @@ func (c *Client) Alive() bool {
 // the loop returns satisfies the os/exec contract that Wait must not race with
 // readers of the stdout pipe.
 func (c *Client) supervise() {
-	err := c.stdio.readLoop(c.name, c.dispatch)
+	err := c.stdio.readLoop(c.dispatch)
 	c.fail(err)
 
 	if c.cmd != nil {
 		if waitErr := c.cmd.Wait(); waitErr != nil {
-			c.log.Warn("language server exited with error", "server", c.name, "error", waitErr)
+			c.log.Warn("language server exited with error", zap.Error(waitErr))
 		}
 	}
 	close(c.exited)
@@ -133,7 +134,7 @@ func (c *Client) supervise() {
 func (c *Client) dispatch(msg inboundMessage) {
 	var id int64
 	if err := json.Unmarshal(msg.ID, &id); err != nil {
-		c.log.Warn("response carries a non-numeric id", "server", c.name, "id", string(msg.ID))
+		c.log.Warn("response carries a non-numeric id", zap.String("id", string(msg.ID)))
 		return
 	}
 
@@ -143,7 +144,7 @@ func (c *Client) dispatch(msg inboundMessage) {
 	c.mu.Unlock()
 	if !ok {
 		// A cancelled call already gave up; dropping the reply is correct.
-		c.log.Warn("no pending call for response", "server", c.name, "id", id)
+		c.log.Warn("no pending call for response", zap.Int64("id", id))
 		return
 	}
 	ch <- &ResponseMessage{ID: msg.ID, Result: msg.Result, Error: msg.Error}
@@ -167,7 +168,7 @@ func (c *Client) fail(err error) {
 	close(c.done)
 	for id, ch := range pending {
 		ch <- &ResponseMessage{Error: &ResponseError{Code: ErrCodeRequestFailed, Message: err.Error()}}
-		c.log.Debug("aborted in-flight lsp request", "server", c.name, "id", id)
+		c.log.Debug("aborted in-flight lsp request", zap.Int64("id", id))
 	}
 }
 
@@ -238,7 +239,7 @@ func (c *Client) Notify(method string, params any) error {
 // notifyBestEffort swallows failures on teardown paths.
 func (c *Client) notifyBestEffort(method string, params any) {
 	if err := c.Notify(method, params); err != nil {
-		c.log.Debug("best-effort notification failed", "server", c.name, "method", method, "error", err)
+		c.log.Debug("best-effort notification failed", zap.String("method", method), zap.Error(err))
 	}
 }
 
@@ -324,13 +325,13 @@ func (c *Client) shutdown(ctx context.Context) error {
 		// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#shutdown
 		graceful, cancel := context.WithTimeout(ctx, terminationGrace)
 		if callErr := c.Call(graceful, MethodShutdown, nil, nil); callErr != nil {
-			c.log.Debug("graceful lsp shutdown failed", "server", c.name, "error", callErr)
+			c.log.Debug("graceful lsp shutdown failed", zap.Error(callErr))
 		}
 		cancel()
 		c.notifyBestEffort(MethodExit, nil)
 	}
 	if err := c.stdio.close(); err != nil {
-		c.log.Debug("closing lsp stdin failed", "server", c.name, "error", err)
+		c.log.Debug("closing lsp stdin failed", zap.Error(err))
 	}
 
 	if c.cmd == nil || c.cmd.Process == nil {
@@ -339,7 +340,7 @@ func (c *Client) shutdown(ctx context.Context) error {
 	}
 
 	if err := terminateTree(c.cmd); err != nil {
-		c.log.Debug("SIGTERM delivery failed", "server", c.name, "error", err)
+		c.log.Debug("SIGTERM delivery failed", zap.Error(err))
 	}
 	select {
 	case <-c.exited:
@@ -347,7 +348,7 @@ func (c *Client) shutdown(ctx context.Context) error {
 	case <-time.After(terminationGrace):
 	}
 
-	c.log.Warn("language server ignored SIGTERM, escalating to SIGKILL", "server", c.name)
+	c.log.Warn("language server ignored SIGTERM, escalating to SIGKILL")
 	if err := killTree(c.cmd); err != nil {
 		return fmt.Errorf("lsp: kill %s: %w", c.name, err)
 	}

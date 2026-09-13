@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,14 +11,14 @@ import (
 	"syscall"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/avatar31/dotfs-mcp-server/internal/config"
 	"github.com/avatar31/dotfs-mcp-server/internal/utils"
 )
 
 // Sentinel failures the tool layer maps onto actionable guidance for the utils.
 var (
-	// ErrDisabled is returned when cross-reference support is switched off.
-	ErrDisabled = errors.New("lsp: cross-reference engine is disabled")
 	// ErrNoCompileCommands means clangd would not be able to resolve headers.
 	ErrNoCompileCommands = errors.New("lsp: no compile_commands.json was found for this repository")
 	// ErrNoGoModule means gopls has no module to load.
@@ -46,7 +45,7 @@ type spawnAttempt struct {
 // A daemon that died is transparently replaced on the next request.
 type Manager struct {
 	cfg *config.Config
-	log *slog.Logger
+	log *zap.Logger
 
 	mu      sync.Mutex
 	clients map[string]*Client
@@ -56,7 +55,7 @@ type Manager struct {
 
 // NewManager builds a pool. It performs no I/O and never fails, so a workspace
 // without any language server installed still boots normally.
-func NewManager(cfg *config.Config, log *slog.Logger) *Manager {
+func NewManager(cfg *config.Config, log *zap.Logger) *Manager {
 	return &Manager{
 		cfg:     cfg,
 		log:     log,
@@ -70,10 +69,6 @@ func (m *Manager) RequestTimeout() time.Duration { return m.cfg.LSPConfig.Reques
 
 // ClientSession returns a ready session for repoDir, spawning and initialising one if necessary
 func (m *Manager) ClientSession(ctx context.Context, repo, repoDir string, lang utils.Language) (*Client, error) {
-	if !m.cfg.LSPConfig.Enabled {
-		return nil, ErrDisabled
-	}
-
 	key := repo + "|" + string(lang)
 
 	// Bounded retry: an attempt only repeats when the session we were handed had
@@ -92,7 +87,8 @@ func (m *Manager) ClientSession(ctx context.Context, repo, repoDir string, lang 
 			// The daemon crashed. Drop the reference and respawn below; the dead
 			// client's supervisor goroutine has already reaped the process.
 			delete(m.clients, key)
-			m.log.Warn("language server died, respawning", "repo", repo, "language", lang, "error", existing.Err())
+			m.log.Warn("language server died, respawning", zap.String("repo", repo),
+				zap.String("language", string(lang)), zap.Error(existing.Err()))
 		}
 		if inflight, ok := m.pending[key]; ok {
 			m.mu.Unlock()
@@ -175,7 +171,8 @@ func (m *Manager) spawn(ctx context.Context, repo, repoDir string, lang utils.La
 
 	name := fmt.Sprintf("%s[%s]", filepath.Base(bin), repo)
 	client := newClient(name, stdin, stdout, cmd, m.log)
-	m.log.Info("language server started", "server", name, "pid", cmd.Process.Pid, "dir", repoDir)
+	m.log.Info("language server started", zap.String("server", name),
+		zap.Int("pid", cmd.Process.Pid), zap.String("dir", repoDir))
 
 	initCtx, cancel := context.WithTimeout(ctx, m.cfg.LSPConfig.InitTimeout)
 	defer cancel()

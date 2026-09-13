@@ -7,12 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpsrv "github.com/mark3labs/mcp-go/server"
+	"go.uber.org/zap"
 
 	model "github.com/avatar31/dotfs-mcp-server/internal/ast"
 	"github.com/avatar31/dotfs-mcp-server/internal/ast/indexer"
@@ -56,7 +56,7 @@ type Deps struct {
 	Cache    Cache
 	Scanner  LiveScanner
 	Matrix   *capabilities.Matrix
-	Log      *slog.Logger
+	Log      *zap.Logger
 	Name     string
 	Version  string
 	LiveScan bool
@@ -316,7 +316,7 @@ func (d Deps) resolve(ctx context.Context, q query) ([]model.SymbolRecord, error
 		return nil, err
 	}
 	if len(records) > 0 {
-		d.Log.Debug("cache hit", "symbol", q.name, "matches", len(records))
+		d.Log.Debug("cache hit", zap.Any("records", records), zap.String("symbol", q.name))
 		return records, nil
 	}
 	if !d.LiveScan {
@@ -326,7 +326,7 @@ func (d Deps) resolve(ctx context.Context, q query) ([]model.SymbolRecord, error
 	scanCtx, cancel := context.WithTimeout(ctx, liveScanTimeout)
 	defer cancel()
 
-	d.Log.Info("cache miss, running live workspace scan", "symbol", q.name)
+	d.Log.Info("cache miss, running live workspace scan", zap.String("symbol", q.name))
 	live, err := d.Scanner.SearchLive(scanCtx, q.name, q.types)
 	if err != nil {
 		return nil, err
@@ -351,9 +351,11 @@ func (d Deps) handleGlobalSearch(ctx context.Context, req mcp.CallToolRequest) (
 		return mcp.NewToolResultError("target_function_name is required and must be a non-empty string"), nil
 	}
 
+	d.Log.Debug("Looking up function globally", zap.String("function", target))
+
 	records, err := d.resolve(ctx, query{name: target, types: model.CallableTypes, exact: true})
 	if err != nil {
-		d.Log.Error("global search failed", "function", target, "error", err)
+		d.Log.Error("global search failed", zap.String("function", target), zap.Error(err))
 		return mcp.NewToolResultErrorFromErr("global codebase search failed", err), nil
 	}
 	switch len(records) {
@@ -386,9 +388,11 @@ func (d Deps) handleLookupSymbol(ctx context.Context, req mcp.CallToolRequest) (
 		types = []model.SymbolType{t}
 	}
 
+	d.Log.Debug("Looking up symbol", zap.String("name", name), zap.String("repo", repo), zap.Any("types", types))
+
 	records, err := d.resolve(ctx, query{name: name, repo: repo, types: types})
 	if err != nil {
-		d.Log.Error("symbol lookup failed", "symbol", name, "error", err)
+		d.Log.Error("symbol lookup failed", zap.String("symbol", name), zap.Error(err))
 		return mcp.NewToolResultErrorFromErr("symbol lookup failed", err), nil
 	}
 	if len(records) == 0 {
@@ -408,6 +412,8 @@ func (d Deps) handleTypeDefinition(ctx context.Context, req mcp.CallToolRequest)
 		return errResult, nil
 	}
 
+	d.Log.Debug("Looking up type definition", zap.String("name", name), zap.String("repo", repo))
+
 	records, err := d.resolve(ctx, query{
 		name:  name,
 		repo:  repo,
@@ -415,7 +421,7 @@ func (d Deps) handleTypeDefinition(ctx context.Context, req mcp.CallToolRequest)
 		exact: true,
 	})
 	if err != nil {
-		d.Log.Error("type lookup failed", "type", name, "error", err)
+		d.Log.Error("type lookup failed", zap.String("type", name), zap.Error(err))
 		return mcp.NewToolResultErrorFromErr("type definition lookup failed", err), nil
 	}
 	if len(records) == 0 {
@@ -435,6 +441,8 @@ func (d Deps) handleMacroOrConst(ctx context.Context, req mcp.CallToolRequest) (
 		return errResult, nil
 	}
 
+	d.Log.Debug("Looking up macro or constant", zap.String("name", name), zap.String("repo", repo))
+
 	records, err := d.resolve(ctx, query{
 		name:  name,
 		repo:  repo,
@@ -442,7 +450,7 @@ func (d Deps) handleMacroOrConst(ctx context.Context, req mcp.CallToolRequest) (
 		exact: true,
 	})
 	if err != nil {
-		d.Log.Error("macro lookup failed", "name", name, "error", err)
+		d.Log.Error("macro lookup failed", zap.String("name", name), zap.Error(err))
 		return mcp.NewToolResultErrorFromErr("macro or constant lookup failed", err), nil
 	}
 	if len(records) == 0 {
@@ -473,9 +481,12 @@ func (d Deps) handleReadSnippet(_ context.Context, req mcp.CallToolRequest) (*mc
 		return mcp.NewToolResultError("end_line is required and must be an integer"), nil
 	}
 
+	d.Log.Debug("Reading code snippet", zap.String("repo", repo), zap.String("file", path),
+		zap.Int("start", start), zap.Int("end", end))
+
 	snippet, err := d.Scanner.ReadSnippet(repo, path, start, end)
 	if err != nil {
-		d.Log.Warn("snippet read failed", "repo", repo, "file", path, "error", err)
+		d.Log.Warn("snippet read failed", zap.String("repo", repo), zap.String("file", path), zap.Error(err))
 		return mcp.NewToolResultErrorFromErr("could not read the requested snippet", err), nil
 	}
 	return mcp.NewToolResultText(snippet), nil
@@ -491,9 +502,11 @@ func (d Deps) handleListCapabilities(_ context.Context, req mcp.CallToolRequest)
 		return mcp.NewToolResultErrorFromErr("invalid repo_name", err), nil
 	}
 
+	d.Log.Debug("Listing repository capabilities", zap.String("repo", repo))
+
 	stats, err := d.Cache.Stats()
 	if err != nil {
-		d.Log.Error("cache statistics failed", "repo", repo, "error", err)
+		d.Log.Error("cache statistics failed", zap.String("repo", repo), zap.Error(err))
 		return mcp.NewToolResultErrorFromErr("cache statistics failed", err), nil
 	}
 
@@ -527,10 +540,10 @@ func (d Deps) handleFindReferences(ctx context.Context, req mcp.CallToolRequest)
 		return errResult, nil
 	}
 
-	result, err := d.XRef.FindReferences(ctx, xref.ReferenceRequest{
-		Position:           pos,
-		IncludeDeclaration: req.GetBool("include_declaration", false),
-	})
+	inclideDecl := req.GetBool("include_declaration", false)
+	d.Log.Debug("Finding references", zap.Any("request", pos), zap.Bool("include_declaration", inclideDecl))
+
+	result, err := d.XRef.FindReferences(ctx, xref.ReferenceRequest{Position: pos, IncludeDeclaration: inclideDecl})
 	if err != nil {
 		return d.xrefError("find_references", pos, err), nil
 	}
@@ -548,6 +561,8 @@ func (d Deps) handleCallHierarchy(ctx context.Context, req mcp.CallToolRequest) 
 		return mcp.NewToolResultError("direction is required and must be 'incoming' or 'outgoing'"), nil
 	}
 
+	d.Log.Debug("Finding call hierarchy", zap.Any("request", pos), zap.String("direction", direction))
+
 	result, err := d.XRef.CallHierarchy(ctx, xref.CallHierarchyRequest{Position: pos, Direction: direction})
 	if err != nil {
 		return d.xrefError("get_call_hierarchy", pos, err), nil
@@ -561,6 +576,8 @@ func (d Deps) handleImplementations(ctx context.Context, req mcp.CallToolRequest
 	if errResult != nil {
 		return errResult, nil
 	}
+
+	d.Log.Debug("Finding implementation", zap.Any("request", pos))
 
 	result, err := d.XRef.Implementations(ctx, pos)
 	if err != nil {
@@ -576,6 +593,8 @@ func (d Deps) handleTypeHierarchy(ctx context.Context, req mcp.CallToolRequest) 
 		return errResult, nil
 	}
 
+	d.Log.Debug("Finding type hierarchy", zap.Any("request", pos))
+
 	result, err := d.XRef.TypeHierarchy(ctx, xref.TypeHierarchyRequest{
 		Position:  pos,
 		Direction: req.GetString("direction", xref.DirectionBoth),
@@ -590,7 +609,12 @@ func (d Deps) handleTypeHierarchy(ctx context.Context, req mcp.CallToolRequest) 
 // tells the agent how to keep making progress with the Phase 1/2 tools.
 func (d Deps) xrefError(tool string, pos xref.Position, err error) *mcp.CallToolResult {
 	d.Log.Warn("cross-reference query failed",
-		"tool", tool, "repo", pos.Repo, "file", pos.FilePath, "line", pos.Line, "error", err)
+		zap.String("tool", tool),
+		zap.String("repo", pos.Repo),
+		zap.String("file", pos.FilePath),
+		zap.Int("line", pos.Line),
+		zap.Error(err),
+	)
 
 	switch {
 	case errors.Is(err, xref.ErrTimeout), errors.Is(err, context.DeadlineExceeded):
@@ -616,14 +640,15 @@ func (d Deps) xrefError(tool string, pos xref.Position, err error) *mcp.CallTool
 			"No language server handles this file type. Only .go, .c/.h and C++ sources are supported; "+
 				"use lookup_symbol for anything else that was statically indexed", err)
 
+	case errors.Is(err, utils.ErrUnsupportedGoLanguage):
+		return mcp.NewToolResultErrorFromErr(
+			"go language is already supported via native `gopls mcp` tool, check "+utils.GOPLS_INSTRUCTION_FILE+
+				" for more instructions in workspace root", err)
+
 	case errors.Is(err, lsp.ErrDaemonExited):
 		return mcp.NewToolResultErrorFromErr(
 			"The language server crashed while answering. A fresh daemon will be started on the next call, "+
 				"so retrying once is usually enough", err)
-
-	case errors.Is(err, lsp.ErrDisabled), errors.Is(err, lsp.ErrClosed):
-		return mcp.NewToolResultErrorFromErr(
-			"The cross-reference engine is not running. Use lookup_symbol and global_codebase_search instead", err)
 
 	default:
 		return mcp.NewToolResultErrorFromErr(fmt.Sprintf("%s failed", tool), err)

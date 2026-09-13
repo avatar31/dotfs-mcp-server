@@ -6,6 +6,7 @@ require (
 	github.com/dgraph-io/badger/v4 v4.9.6
 	github.com/mark3labs/mcp-go v0.58.0
 	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
+	go.uber.org/zap v1.28.0
 )
 
 require (
@@ -25,6 +26,7 @@ require (
 	go.opentelemetry.io/otel v1.41.0 // indirect
 	go.opentelemetry.io/otel/metric v1.41.0 // indirect
 	go.opentelemetry.io/otel/trace v1.41.0 // indirect
+	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
 	google.golang.org/protobuf v1.36.7 // indirect

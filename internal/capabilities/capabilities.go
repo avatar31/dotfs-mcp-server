@@ -4,9 +4,9 @@
 package capabilities
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 )
@@ -50,21 +50,15 @@ func NewMatrix(profiles []Profile) *Matrix {
 	return m
 }
 
+//go:embed capabilities.json
+var rawCapabilities []byte
+
 // Load reads a JSON array of profiles. An empty path yields an empty matrix so
 // the server can run without any curated metadata.
-func Load(path string) (*Matrix, error) {
-	if strings.TrimSpace(path) == "" {
-		return NewMatrix(nil), nil
-	}
-
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read capability matrix %q: %w", path, err)
-	}
-
+func Load() (*Matrix, error) {
 	var profiles []Profile
-	if err := json.Unmarshal(raw, &profiles); err != nil {
-		return nil, fmt.Errorf("parse capability matrix %q: %w", path, err)
+	if err := json.Unmarshal(rawCapabilities, &profiles); err != nil {
+		return nil, fmt.Errorf("parse capability matrix capabilities.json: %w", err)
 	}
 	return NewMatrix(profiles), nil
 }

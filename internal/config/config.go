@@ -16,8 +16,8 @@ import (
 
 // Default values applied when the matching environment variable is unset.
 const (
-	DefaultWorkspaceRoot = "./workspace"
-	DefaultCacheDir      = "./agent_knowledge"
+	DefaultCacheDir      = "/tmp/dotfs-agent-knowledge"
+	DefaultLogPath       = "/var/log/dotfs-mcp-server.log"
 	DefaultHTTPAddr      = "127.0.0.1:8080"
 	DefaultMaxFileSize   = 2 << 20 // 2 MiB
 	DefaultServerName    = "dotfs-mcp-server"
@@ -30,9 +30,6 @@ const (
 )
 
 type LSPConfig struct {
-	// Enabled toggles the cross-reference engine. When false the
-	// four relational tools are not advertised to the MCP client at all.
-	Enabled bool
 	// GoplsPath / ClangdPath are executable names resolved through $PATH, or
 	// absolute paths to a pinned build.
 	GoplsPath  string
@@ -68,8 +65,8 @@ type Config struct {
 	SkipDirs []string
 	// GCInterval controls BadgerDB value-log garbage collection cadence.
 	GCInterval time.Duration
-	// LogLevel is one of debug, info, warn, error.
-	LogLevel string
+	// LogPath is log file path
+	LogPath string
 	// ServerName / ServerVersion are advertised during the MCP handshake.
 	ServerName    string
 	ServerVersion string
@@ -80,14 +77,14 @@ type Config struct {
 // Load reads the environment, applies defaults and validates the result.
 func Load() (*Config, error) {
 	cfg := Config{
-		WorkspaceRoot:    envString("DOTFS_WORKSPACE_ROOT", DefaultWorkspaceRoot),
-		CacheDir:         envString("DOTFS_CACHE_DB", DefaultCacheDir),
-		HTTPAddr:         envString("DOTFS_HTTP_ADDR", DefaultHTTPAddr),
-		APIToken:         os.Getenv("DOTFS_API_TOKEN"),
-		LogLevel:         envString("DOTFS_LOG_LEVEL", "info"),
-		ServerName:       envString("DOTFS_SERVER_NAME", DefaultServerName),
-		ServerVersion:    envString("DOTFS_SERVER_VERSION", DefaultServerVersion),
-		SkipDirs:         envList("DOTFS_SKIP_DIRS", skipDirs()),
+		WorkspaceRoot: envString("DOTFS_WORKSPACE_ROOT", ""),
+		CacheDir:      envString("DOTFS_CACHE_DB", DefaultCacheDir),
+		HTTPAddr:      envString("DOTFS_HTTP_ADDR", DefaultHTTPAddr),
+		APIToken:      os.Getenv("DOTFS_API_TOKEN"),
+		LogPath:       envString("DOTFS_LOG_PATH", DefaultLogPath),
+		ServerName:    envString("DOTFS_SERVER_NAME", DefaultServerName),
+		ServerVersion: envString("DOTFS_SERVER_VERSION", DefaultServerVersion),
+		SkipDirs:      envList("DOTFS_SKIP_DIRS", skipDirs()),
 		LSPConfig: &LSPConfig{
 			GoplsPath:  envString("DOTFS_GOPLS_PATH", DefaultGoplsPath),
 			ClangdPath: envString("DOTFS_CLANGD_PATH", DefaultClangdPath),
@@ -106,9 +103,6 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if cfg.GCInterval, err = envDuration("DOTFS_GC_INTERVAL", 10*time.Minute); err != nil {
-		return nil, err
-	}
-	if cfg.LSPConfig.Enabled, err = envBool("DOTFS_LSP_ENABLED", true); err != nil {
 		return nil, err
 	}
 	if cfg.LSPConfig.RequestTimeout, err = envDuration("DOTFS_LSP_TIMEOUT", DefaultRequestTimeout); err != nil {
@@ -141,11 +135,6 @@ func (c Config) Validate() error {
 	}
 	if c.GCInterval <= 0 {
 		return fmt.Errorf("DOTFS_GC_INTERVAL must be greater than zero, got %s", c.GCInterval)
-	}
-	switch c.LogLevel {
-	case "debug", "info", "warn", "error":
-	default:
-		return fmt.Errorf("DOTFS_LOG_LEVEL must be one of debug|info|warn|error, got %q", c.LogLevel)
 	}
 	if c.EnableHTTP && strings.TrimSpace(c.HTTPAddr) == "" {
 		return fmt.Errorf("DOTFS_HTTP_ADDR must not be empty when the management API is enabled")

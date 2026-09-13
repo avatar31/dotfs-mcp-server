@@ -2,8 +2,6 @@ package indexer
 
 import (
 	"context"
-	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,12 +11,13 @@ import (
 	"github.com/avatar31/dotfs-mcp-server/internal/ast/parser"
 	"github.com/avatar31/dotfs-mcp-server/internal/ast/store"
 	"github.com/avatar31/dotfs-mcp-server/internal/utils"
+	"go.uber.org/zap/zaptest"
 )
 
 func newTestIndexer(t *testing.T, root string) (*Indexer, *store.Store) {
 	t.Helper()
 
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	log := zaptest.NewLogger(t)
 	st, err := store.Open(t.TempDir(), log)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -46,7 +45,7 @@ func newTestIndexer(t *testing.T, root string) (*Indexer, *store.Store) {
 func fixtureWorkspace(t *testing.T) string {
 	t.Helper()
 
-	src := filepath.Join("..", "..", "testdata", "workspace")
+	src := filepath.Join("..", "..", "..", "testdata", "workspace")
 	dst := t.TempDir()
 
 	err := filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
